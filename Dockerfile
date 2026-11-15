@@ -60,7 +60,11 @@ RUN npm install
 
 COPY . .
 
+# X11 socket directory එක සාදා permissions ලබා දීම
+RUN mkdir -p /tmp/.X11-unix && chmod 1777 /tmp/.X11-unix
+
+ENV DISPLAY=:99
 EXPOSE 3000
 
-# Xvfb virtual display එකක් සමඟ server එක ආරම්භ කිරීම
-CMD ["xvfb-run", "--auto-servernum", "--server-args=-screen 0 1920x1080x24", "npm", "start"]
+# Xvfb background එකේ start කර කෙලින්ම Node server එක run කිරීම
+CMD ["sh", "-c", "Xvfb :99 -screen 0 1920x1080x24 -ac +extension GLX +render -noreset & node index.js"]
