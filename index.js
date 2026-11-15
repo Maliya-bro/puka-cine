@@ -2,6 +2,9 @@ import express from 'express';
 import axios from 'axios';
 import * as cheerio from 'cheerio';
 import { connect } from 'puppeteer-real-browser';
+import fs from 'fs';
+import path from 'path';
+import os from 'os';
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -127,12 +130,22 @@ async function resolveZtLink(ztLinkUrl, reqId) {
 }
 
 // =========================================================================
-// 2. LINUX REAL BROWSER SECTION
+// 2. LINUX REAL BROWSER SECTION (Fixed Args Passing)
 // =========================================================================
 
 async function getUltimateR2Link(driveUrl, reqId) {
     let browser;
     let ultimateMediaUrl = null;
+
+    const chromeFlags = [
+        '--no-sandbox',
+        '--disable-setuid-sandbox',
+        '--disable-dev-shm-usage',
+        '--disable-gpu',
+        '--disable-software-rasterizer',
+        '--no-zygote',
+        '--window-size=1920,1080'
+    ];
 
     try {
         log(`BROWSER:${reqId}`, `🤖 Launching Chrome via puppeteer-real-browser (DISPLAY=${process.env.DISPLAY || 'none'})...`);
@@ -141,17 +154,10 @@ async function getUltimateR2Link(driveUrl, reqId) {
             headless: false,
             turnstile: true,
             disableXvfb: true,
+            args: chromeFlags, // 🔴 puppeteer-real-browser v1.3+ සඳහා root 'args' අනිවාර්යයි
             customConfig: {
                 chromePath: '/usr/bin/google-chrome',
-                chromeFlags: [
-                    '--no-sandbox',
-                    '--disable-setuid-sandbox',
-                    '--disable-dev-shm-usage',
-                    '--disable-gpu',
-                    '--disable-software-rasterizer',
-                    '--no-zygote',
-                    '--window-size=1920,1080'
-                ]
+                chromeFlags: chromeFlags
             }
         });
 
@@ -271,6 +277,21 @@ async function getUltimateR2Link(driveUrl, reqId) {
 
     } catch (error) {
         log(`BROWSER-ERR:${reqId}`, `💥 Exception: ${error.stack || error.message}`);
+
+        // Dump chrome-err.log from /tmp if available
+        try {
+            const tmpDir = os.tmpdir();
+            const files = fs.readdirSync(tmpDir).filter(f => f.startsWith('lighthouse'));
+            for (const folder of files) {
+                const errLogPath = path.join(tmpDir, folder, 'chrome-err.log');
+                if (fs.existsSync(errLogPath)) {
+                    const logContent = fs.readFileSync(errLogPath, 'utf8');
+                    if (logContent.trim()) {
+                        log(`CHROME-LOG:${reqId}`, `📄 ${folder}/chrome-err.log:\n${logContent}`);
+                    }
+                }
+            }
+        } catch (logErr) {}
     } finally {
         if (browser) {
             log(`BROWSER:${reqId}`, `🧹 Closing Chrome instance...`);
