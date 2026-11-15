@@ -7,7 +7,6 @@ const app = express();
 const PORT = process.env.PORT || 3000;
 const delay = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 
-// Timestamp helper for clean Railway logs
 const log = (tag, msg) => {
     const time = new Date().toISOString().split('T')[1].split('.')[0];
     console.log(`[${time}] [${tag}] ${msg}`);
@@ -16,7 +15,7 @@ const log = (tag, msg) => {
 app.use(express.json());
 
 // =========================================================================
-// 0. REQUEST LOGGER MIDDLEWARE (සෑම Request එකක්ම Log කිරීම)
+// 0. REQUEST LOGGER MIDDLEWARE
 // =========================================================================
 app.use((req, res, next) => {
     const startTime = Date.now();
@@ -128,7 +127,7 @@ async function resolveZtLink(ztLinkUrl, reqId) {
 }
 
 // =========================================================================
-// 2. LINUX REAL BROWSER SECTION (Full Step-by-Step Logging)
+// 2. LINUX REAL BROWSER SECTION
 // =========================================================================
 
 async function getUltimateR2Link(driveUrl, reqId) {
@@ -136,12 +135,12 @@ async function getUltimateR2Link(driveUrl, reqId) {
     let ultimateMediaUrl = null;
 
     try {
-        log(`BROWSER:${reqId}`, `🤖 Launching Chrome via puppeteer-real-browser (Xvfb)...`);
+        log(`BROWSER:${reqId}`, `🤖 Launching Chrome via puppeteer-real-browser (DISPLAY=${process.env.DISPLAY || 'none'})...`);
 
         const connection = await connect({
             headless: false,
             turnstile: true,
-            disableXvfb: false,
+            disableXvfb: true,
             customConfig: {
                 chromePath: '/usr/bin/google-chrome',
                 chromeFlags: [
@@ -149,6 +148,8 @@ async function getUltimateR2Link(driveUrl, reqId) {
                     '--disable-setuid-sandbox',
                     '--disable-dev-shm-usage',
                     '--disable-gpu',
+                    '--disable-software-rasterizer',
+                    '--no-zygote',
                     '--window-size=1920,1080'
                 ]
             }
@@ -158,7 +159,6 @@ async function getUltimateR2Link(driveUrl, reqId) {
         const page = connection.page;
         log(`BROWSER:${reqId}`, `✅ Chrome launched & connected successfully`);
 
-        // Browser console logs & page errors print කිරීම
         page.on('console', msg => {
             if (msg.type() === 'error') {
                 log(`PAGE-ERR:${reqId}`, `⚠️  Browser Console Error: ${msg.text()}`);
@@ -169,7 +169,6 @@ async function getUltimateR2Link(driveUrl, reqId) {
             log(`PAGE-ERR:${reqId}`, `⚠️  Page Runtime Error: ${err.message}`);
         });
 
-        // CDP Download Interceptor
         const client = await page.target().createCDPSession();
         await client.send('Page.setDownloadBehavior', { behavior: 'deny' });
 
@@ -181,7 +180,6 @@ async function getUltimateR2Link(driveUrl, reqId) {
             }
         });
 
-        // Anti-DevTool & Redirect blocker
         await page.evaluateOnNewDocument(() => {
             window.DisableDevtool = function() { };
             window.open = function(url) { window.location.href = url; return window; };
@@ -192,7 +190,6 @@ async function getUltimateR2Link(driveUrl, reqId) {
             };
         });
 
-        // Network Request Interceptor
         await page.setRequestInterception(true);
         page.on('request', (req) => {
             const url = req.url();
