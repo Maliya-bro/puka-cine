@@ -51,21 +51,20 @@ async function searchMovies(query, reqId) {
     const { data } = await axios.get(searchUrl, { headers: COMMON_HEADERS });
     const $ = cheerio.load(data);
     const results = [];
+    const seenUrls = new Set();
 
-    $('.display-item .item-box').each((i, el) => {
+    $('.page-body .display-item .item-box, .display-item .item-box').each((i, el) => {
         const anchor = $(el).find('> a').first();
-        const title = anchor.attr('title')?.trim();
+        const title = anchor.attr('title')?.trim() || $(el).find('.item-desc-title h3').text().trim();
         const url = anchor.attr('href');
-        const imgEl = $(el).find('img').first();
-        const poster = imgEl.attr('data-src') || imgEl.attr('src') || null;
-        const year = $(el).find('.year, .metadata span').first().text().trim() || null;
 
-        if (title && url) {
-            results.push({ title, year, poster, url });
+        if (title && url && !seenUrls.has(url)) {
+            seenUrls.add(url);
+            results.push({ title, url });
         }
     });
 
-    log(`SEARCH:${reqId}`, `✅ Found ${results.length} movies for "${query}"`);
+    log(`SEARCH:${reqId}`, `✅ Found ${results.length} results for "${query}"`);
     return results;
 }
 
@@ -127,13 +126,13 @@ async function getMovieInfoAndQualities(movieUrl, reqId) {
 
     const tagline = $('.movie-tagline-box .tagline-text').first().text().trim() || null;
 
-    // 2. Main Poster Image (Exact CineSubz Poster)
+    // 2. Main Poster Image
     const poster = $('.content-poster img.poster-img').first().attr('src')
         || $('.content-poster img').first().attr('data-src')
         || $('meta[property="og:image"]').last().attr('content')
         || null;
 
-    // 3. Backdrop & Gallery Screenshots (Full Original HD Images)
+    // 3. Backdrop & Gallery Screenshots
     const backdrop = $('.player-splash .splash-bg img').first().attr('src') || null;
     const gallery = [];
     $('.content-gall .gall-item a').each((i, el) => {
@@ -143,7 +142,7 @@ async function getMovieInfoAndQualities(movieUrl, reqId) {
         }
     });
 
-    // 4. Synopsis / හැඳින්වීම (Clean Sinhala/English Description)
+    // 4. Synopsis / හැඳින්වීම
     const descClone = $('.details-desc').first().clone();
     descClone.find('br').replaceWith('\n');
     const synopsis = descClone.text()
@@ -172,7 +171,7 @@ async function getMovieInfoAndQualities(movieUrl, reqId) {
         }
     });
 
-    // 7. Extra Info (Director, Year, Subtitle By, Country)
+    // 7. Extra Info
     let director = null;
     let year = null;
     let subtitleBy = null;
@@ -202,7 +201,7 @@ async function getMovieInfoAndQualities(movieUrl, reqId) {
     const rawQualities = [];
     $('.movie-download-link-item a').each((i, el) => {
         const ztUrl = $(el).attr('href');
-        const metaText = $(el).find('.movie-download-meta').text().trim(); // e.g., "WEB-DL 480p • 800 MB • English"
+        const metaText = $(el).find('.movie-download-meta').text().trim();
 
         if (ztUrl && metaText) {
             const parts = metaText.split('•').map(p => p.trim());
@@ -510,21 +509,20 @@ app.get('/', (req, res) => {
             <span class="method">GET</span>
             <span class="path">/search?q={query}</span>
         </div>
-        <p>Search movies or TV series by name. Returns title, release year, poster image, and movie page URL.</p>
+        <p>Search movies or TV series by name. Returns title and movie page URL.</p>
         <table>
             <tr><th>Parameter</th><th>Required</th><th>Description</th></tr>
-            <tr><td><code>q</code></td><td>Yes</td><td>Movie name to search (e.g., <code>spider-man</code>)</td></tr>
+            <tr><td><code>q</code></td><td>Yes</td><td>Movie or TV series name to search (e.g., <code>spider man</code>)</td></tr>
         </table>
         <span class="label">Example Request</span>
-        <pre>${baseUrl}/search?q=spider-man</pre>
+        <pre>${baseUrl}/search?q=spider man</pre>
         <span class="label">Example Response</span>
         <pre>{
   "success": true,
+  "count": 28,
   "results": [
     {
-      "title": "Spider-Man: Brand New Day (2026) Sinhala Subtitles",
-      "year": "2026",
-      "poster": "https://cinesubz.lk/wp-content/uploads/2026/08/Spider-Man-WEB-1.jpg",
+      "title": "Spider-Man: Brand New Day (2026) Sinhala Subtitles | සිංහල උපසිරැසි සමඟ",
       "url": "https://cinesubz.lk/movies/spider-man-brand-new-day-2026-sinhala-subtitles/"
     }
   ]
@@ -622,7 +620,7 @@ app.get('/', (req, res) => {
 const API = '${baseUrl}';
 
 // 1. Search Movie
-const { data: searchData } = await axios.get(\`\${API}/search\`, { params: { q: 'spider-man' } });
+const { data: searchData } = await axios.get(\`\${API}/search\`, { params: { q: 'spider man' } });
 const movieUrl = searchData.results[0].url;
 
 // 2. Get Full Movie Info + Resolved Drive Links
@@ -650,7 +648,7 @@ app.get('/search', async (req, res) => {
     }
     try {
         const results = await searchMovies(query, req.reqId);
-        res.json({ success: true, results });
+        res.json({ success: true, count: results.length, results });
     } catch (e) {
         log(`ERR:${req.reqId}`, `Search failed: ${e.message}`);
         res.status(500).json({ success: false, error: e.message });
