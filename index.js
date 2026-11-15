@@ -120,55 +120,97 @@ async function getMovieInfoAndQualities(movieUrl, reqId) {
     const { data } = await axios.get(movieUrl, { headers: COMMON_HEADERS });
     const $ = cheerio.load(data);
 
-    // 1. Basic Movie Details
-    const title = $('h1.entry-title, .sheader .data h1, meta[property="og:title"]').first().text().trim()
-        || $('meta[property="og:title"]').attr('content')?.replace(' - CineSubz', '').trim()
+    // 1. Title & Tagline
+    const title = $('.details-title h3').first().text().trim()
+        || $('meta[property="og:title"]').attr('content')?.trim()
         || 'Unknown Title';
 
-    const poster = $('.poster img, .sheader .poster img').first().attr('data-src')
-        || $('.poster img, .sheader .poster img').first().attr('src')
-        || $('meta[property="og:image"]').attr('content')
+    const tagline = $('.movie-tagline-box .tagline-text').first().text().trim() || null;
+
+    // 2. Main Poster Image (Exact CineSubz Poster)
+    const poster = $('.content-poster img.poster-img').first().attr('src')
+        || $('.content-poster img').first().attr('data-src')
+        || $('meta[property="og:image"]').last().attr('content')
         || null;
 
-    // 2. Backdrop & Gallery Images
-    const images = [];
-    const ogImage = $('meta[property="og:image"]').attr('content');
-    if (ogImage) images.push(ogImage);
-
-    $('#dt_galery img, .g-item img, .gallery img, .wp-content img').each((i, el) => {
-        const src = $(el).attr('data-src') || $(el).attr('src');
-        if (src && src.startsWith('http') && !images.includes(src)) {
-            images.push(src);
+    // 3. Backdrop & Gallery Screenshots (Full Original HD Images)
+    const backdrop = $('.player-splash .splash-bg img').first().attr('src') || null;
+    const gallery = [];
+    $('.content-gall .gall-item a').each((i, el) => {
+        const href = $(el).attr('href');
+        if (href && href.startsWith('http') && !gallery.includes(href)) {
+            gallery.push(href);
         }
     });
 
-    // 3. Metadata (Rating, Release Date, Duration, Genres, Description)
-    const rating = $('.dt_rating_vgs, .rating .value, .starstruck-rating').first().text().trim() || null;
-    const releaseDate = $('.sheader .extra .date, span[itemprop="dateCreated"]').first().text().trim() || null;
-    const duration = $('.sheader .extra .runtime, span[itemprop="duration"]').first().text().trim() || null;
-    const country = $('.sheader .extra .country').first().text().trim() || null;
+    // 4. Synopsis / හැඳින්වීම (Clean Sinhala/English Description)
+    const descClone = $('.details-desc').first().clone();
+    descClone.find('br').replaceWith('\n');
+    const synopsis = descClone.text()
+        .split('\n')
+        .map(line => line.trim())
+        .filter(line => line.length > 0)
+        .join('\n\n') || null;
 
+    // 5. Ratings, Duration, Release Date, Quality, IMDb ID
+    const imdbId = $('.imdb-data').attr('data-imdb') || null;
+    const imdbText = $('.data-imdb').text().replace(/\s+/g, ' ').trim();
+    const imdbMatch = imdbText.match(/IMDb:\s*([\d.]+)/i);
+    const imdbRating = imdbMatch ? imdbMatch[1] : null;
+
+    const siteRating = $('.zt_rating_vgs').first().text().trim() || null;
+    const qualityBadge = $('.details-data .data-quality').first().text().trim() || null;
+    const duration = $('.details-data span[itemprop="duration"]').first().text().trim() || null;
+    const releaseDate = $('meta[itemprop="dateCreated"]').attr('content')?.trim() || null;
+
+    // 6. Genres
     const genres = [];
-    $('.sgeneros a, a[rel="tag"]').each((i, el) => {
+    $('.details-genre a').each((i, el) => {
         const g = $(el).text().trim();
-        if (g && !genres.includes(g)) genres.push(g);
+        if (g && !g.startsWith('#') && !genres.includes(g)) {
+            genres.push(g);
+        }
     });
 
-    const synopsis = $('.wp-content p, #info .wp-content p').first().text().trim()
-        || $('meta[property="og:description"]').attr('content')?.trim()
-        || null;
+    // 7. Extra Info (Director, Year, Subtitle By, Country)
+    let director = null;
+    let year = null;
+    let subtitleBy = null;
+    let country = null;
 
-    // 4. Extract Raw Quality Items
+    $('.details-info p').each((i, el) => {
+        const label = $(el).find('strong').text().trim().toLowerCase();
+        const value = $(el).clone().children('strong').remove().end().text().trim();
+        if (label.includes('director')) director = value || null;
+        else if (label.includes('year')) year = value || null;
+        else if (label.includes('subtitle')) subtitleBy = value || null;
+        else if (label.includes('country')) country = value || null;
+    });
+
+    // 8. Cast List
+    const cast = [];
+    $('.zt-cast-card').each((i, el) => {
+        const name = $(el).find('.zt-cast-name').text().trim();
+        const character = $(el).find('.zt-cast-role').text().trim() || null;
+        const image = $(el).find('.zt-cast-image img').attr('src') || null;
+        if (name) {
+            cast.push({ name, character, image });
+        }
+    });
+
+    // 9. Extract Download Links & Resolve ZT Links in Parallel
     const rawQualities = [];
     $('.movie-download-link-item a').each((i, el) => {
         const ztUrl = $(el).attr('href');
-        const qualityText = $(el).find('.movie-download-meta').text().trim();
-        const sizeText = $(el).find('.movie-download-size, span').last().text().trim();
+        const metaText = $(el).find('.movie-download-meta').text().trim(); // e.g., "WEB-DL 480p • 800 MB • English"
 
-        if (ztUrl && qualityText) {
+        if (ztUrl && metaText) {
+            const parts = metaText.split('•').map(p => p.trim());
             rawQualities.push({
-                quality: qualityText,
-                size: sizeText !== qualityText ? sizeText : null,
+                label: metaText,
+                quality: parts[0] || metaText,
+                size: parts[1] || null,
+                language: parts[2] || null,
                 ztUrl
             });
         }
@@ -176,15 +218,16 @@ async function getMovieInfoAndQualities(movieUrl, reqId) {
 
     log(`INFO:${reqId}`, `⚡ Resolving ${rawQualities.length} ZT links in parallel...`);
 
-    // 5. Resolve All ZT Links Simultaneously (Super Fast)
     const downloads = await Promise.all(
         rawQualities.map(async (item) => {
             const driveUrl = await resolveZtLink(item.ztUrl, reqId);
             return {
+                label: item.label,
                 quality: item.quality,
                 size: item.size,
+                language: item.language,
                 ztUrl: item.ztUrl,
-                driveUrl: driveUrl // කෙලින්ම /download එකට දිය හැකි resolved link එක
+                driveUrl
             };
         })
     );
@@ -194,15 +237,26 @@ async function getMovieInfoAndQualities(movieUrl, reqId) {
     return {
         movie: {
             title,
+            tagline,
             url: movieUrl,
             poster,
-            images,
-            rating,
-            releaseDate,
-            duration,
-            country,
-            genres,
-            synopsis
+            backdrop,
+            synopsis,
+            details: {
+                imdbId,
+                imdbRating,
+                siteRating,
+                quality: qualityBadge,
+                releaseDate,
+                year,
+                duration,
+                director,
+                subtitleBy,
+                country,
+                genres
+            },
+            cast,
+            gallery
         },
         downloads
     };
@@ -405,7 +459,7 @@ app.get('/', (req, res) => {
             status: 'online',
             baseUrl,
             endpoints: {
-                search: `${baseUrl}/search?q=deadpool`,
+                search: `${baseUrl}/search?q=spider-man`,
                 infoAndQualities: `${baseUrl}/qualities?url=MOVIE_URL`,
                 downloadWithDriveUrl: `${baseUrl}/download?url=DRIVE_URL`,
                 downloadWithZtUrl: `${baseUrl}/download?ztUrl=ZT_URL`
@@ -459,19 +513,19 @@ app.get('/', (req, res) => {
         <p>Search movies or TV series by name. Returns title, release year, poster image, and movie page URL.</p>
         <table>
             <tr><th>Parameter</th><th>Required</th><th>Description</th></tr>
-            <tr><td><code>q</code></td><td>Yes</td><td>Movie name to search (e.g., <code>deadpool</code>)</td></tr>
+            <tr><td><code>q</code></td><td>Yes</td><td>Movie name to search (e.g., <code>spider-man</code>)</td></tr>
         </table>
         <span class="label">Example Request</span>
-        <pre>${baseUrl}/search?q=deadpool</pre>
+        <pre>${baseUrl}/search?q=spider-man</pre>
         <span class="label">Example Response</span>
         <pre>{
   "success": true,
   "results": [
     {
-      "title": "Deadpool & Wolverine (2024)",
-      "year": "2024",
-      "poster": "https://cinesubz.lk/wp-content/uploads/...",
-      "url": "https://cinesubz.lk/movies/deadpool-wolverine-2024/"
+      "title": "Spider-Man: Brand New Day (2026) Sinhala Subtitles",
+      "year": "2026",
+      "poster": "https://cinesubz.lk/wp-content/uploads/2026/08/Spider-Man-WEB-1.jpg",
+      "url": "https://cinesubz.lk/movies/spider-man-brand-new-day-2026-sinhala-subtitles/"
     }
   ]
 }</pre>
@@ -481,34 +535,57 @@ app.get('/', (req, res) => {
         <div class="endpoint-header">
             <span class="method">GET</span>
             <span class="path">/qualities?url={movieUrl}</span>
+            <span style="color:#94a3b8; font-size:0.85rem;">(Alias: <code>/info</code>)</span>
         </div>
-        <p>Extracts full movie metadata (poster, gallery images, rating, genres, synopsis) AND automatically resolves all ZT download links into direct <code>driveUrl</code> links in parallel.</p>
+        <p>Extracts full movie details (main poster, Sinhala synopsis, IMDb rating, cast, gallery images) AND automatically resolves all ZT download links into direct <code>driveUrl</code> links in parallel.</p>
         <table>
             <tr><th>Parameter</th><th>Required</th><th>Description</th></tr>
             <tr><td><code>url</code></td><td>Yes</td><td>Movie page URL obtained from <code>/search</code></td></tr>
         </table>
         <span class="label">Example Request</span>
-        <pre>${baseUrl}/qualities?url=https://cinesubz.lk/movies/deadpool-wolverine-2024/</pre>
+        <pre>${baseUrl}/qualities?url=https://cinesubz.lk/movies/spider-man-brand-new-day-2026-sinhala-subtitles/</pre>
         <span class="label">Example Response</span>
         <pre>{
   "success": true,
   "movie": {
-    "title": "Deadpool & Wolverine (2024)",
-    "url": "https://cinesubz.lk/movies/deadpool-wolverine-2024/",
-    "poster": "https://...",
-    "images": ["https://...", "https://..."],
-    "rating": "7.8",
-    "releaseDate": "Jul. 24, 2024",
-    "duration": "128 min",
-    "genres": ["Action", "Comedy", "Sci-Fi"],
-    "synopsis": "A listless Wade Wilson toils away in civilian life..."
+    "title": "Spider-Man: Brand New Day (2026) Sinhala Subtitles | සිංහල උපසිරැසි සමඟ",
+    "tagline": "අලුත්ම දවසක්",
+    "url": "https://cinesubz.lk/movies/spider-man-brand-new-day-2026-sinhala-subtitles/",
+    "poster": "https://cinesubz.lk/wp-content/uploads/2026/08/Spider-Man-WEB-1.jpg",
+    "backdrop": "https://image.tmdb.org/t/p/original/qeQJx07rK2xm8SD2sJxFKhE7gs0.jpg",
+    "synopsis": "“ස්පයිඩර්-මෑන්: බ්‍රෑන්ඩ් නිව් ඩේ” පටන්ගන්නේ...",
+    "details": {
+      "imdbId": "tt22084616",
+      "imdbRating": "8.2",
+      "siteRating": "4.7",
+      "quality": "WEB-DL",
+      "releaseDate": "July 29, 2026",
+      "year": "2026",
+      "duration": "145 min",
+      "director": "Destin Daniel Cretton",
+      "subtitleBy": "බ්‍රයන් (Cineru.lk)",
+      "country": "United States, Canada, United Kingdom, Germany",
+      "genres": ["Action", "Adventure", "English", "Science Fiction"]
+    },
+    "cast": [
+      {
+        "name": "Tom Holland",
+        "character": "Peter Parker / Spider-Man",
+        "image": "https://image.tmdb.org/t/p/w185/xKBAaPIa1c7tzZD3Y0MhBLv4hPE.jpg"
+      }
+    ],
+    "gallery": [
+      "https://image.tmdb.org/t/p/original/qeQJx07rK2xm8SD2sJxFKhE7gs0.jpg"
+    ]
   },
   "downloads": [
     {
-      "quality": "480p WEBRip",
-      "size": "450 MB",
-      "ztUrl": "https://cinesubz.net/api-.../mokn1g449p/",
-      "driveUrl": "https://drive.csplayer2.space/server4/new/Deadpool...480p?ext=mp4"
+      "label": "WEB-DL 480p • 800 MB • English",
+      "quality": "WEB-DL 480p",
+      "size": "800 MB",
+      "language": "English",
+      "ztUrl": "https://cinesubz.lk/zt-links/nvm2e3d9ep/",
+      "driveUrl": "https://drive.csplayer2.space/server4/new/Spider-Man...480p?ext=mp4"
     }
   ]
 }</pre>
@@ -521,19 +598,19 @@ app.get('/', (req, res) => {
         </div>
         <p>Bypasses Cloudflare & anti-bot protections using Real Chrome and extracts the final Cloudflare R2 / S3 presigned direct download link.</p>
         <div class="note">
-            <strong>Smart Link Detection:</strong> You can pass either the pre-resolved <code>driveUrl</code> (faster) OR the raw <code>ztUrl</code> using <code>?url=</code>, <code>?driveUrl=</code>, or <code>?ztUrl=</code>.
+            <strong>Smart Link Detection:</strong> Pass either the pre-resolved <code>driveUrl</code> (faster) OR the raw <code>ztUrl</code> using <code>?url=</code>, <code>?driveUrl=</code>, or <code>?ztUrl=</code>.
         </div>
         <table>
             <tr><th>Parameter</th><th>Required</th><th>Description</th></tr>
             <tr><td><code>url</code> (or <code>driveUrl</code> / <code>ztUrl</code>)</td><td>Yes</td><td>Either <code>driveUrl</code> or <code>ztUrl</code> from <code>/qualities</code></td></tr>
         </table>
-        <span class="label">Example Request (Using pre-resolved driveUrl - Recommended)</span>
-        <pre>${baseUrl}/download?url=https://drive.csplayer2.space/server4/new/Deadpool...480p?ext=mp4</pre>
+        <span class="label">Example Request (Using pre-resolved driveUrl)</span>
+        <pre>${baseUrl}/download?url=https://drive.csplayer2.space/server4/new/Spider-Man...480p?ext=mp4</pre>
         <span class="label">Example Response</span>
         <pre>{
   "success": true,
   "inputType": "driveUrl",
-  "driveUrl": "https://drive.csplayer2.space/server4/new/Deadpool...480p?ext=mp4",
+  "driveUrl": "https://drive.csplayer2.space/server4/new/Spider-Man...480p?ext=mp4",
   "downloadUrl": "https://pub-xxxx.r2.cloudflarestorage.com/movie.mp4?X-Amz-Algorithm=..."
 }</pre>
     </div>
@@ -545,12 +622,14 @@ app.get('/', (req, res) => {
 const API = '${baseUrl}';
 
 // 1. Search Movie
-const { data: searchData } = await axios.get(\`\${API}/search\`, { params: { q: 'deadpool' } });
+const { data: searchData } = await axios.get(\`\${API}/search\`, { params: { q: 'spider-man' } });
 const movieUrl = searchData.results[0].url;
 
 // 2. Get Full Movie Info + Resolved Drive Links
 const { data: infoData } = await axios.get(\`\${API}/qualities\`, { params: { url: movieUrl } });
-console.log(infoData.movie.title, infoData.movie.poster);
+console.log(infoData.movie.title);
+console.log(infoData.movie.poster);
+console.log(infoData.movie.synopsis);
 
 // 3. Get Final R2 Direct Download Link (Pass driveUrl directly)
 const selected = infoData.downloads[0];
@@ -578,7 +657,7 @@ app.get('/search', async (req, res) => {
     }
 });
 
-// 2. Movie Info + Resolved Qualities Endpoint (Supports /qualities and /info)
+// 2. Movie Info + Resolved Qualities Endpoint
 app.get(['/qualities', '/info'], async (req, res) => {
     const movieUrl = req.query.url;
     if (!movieUrl) {
@@ -594,7 +673,7 @@ app.get(['/qualities', '/info'], async (req, res) => {
     }
 });
 
-// 3. Smart Download Endpoint (Accepts driveUrl OR ztUrl via ?url=, ?driveUrl=, or ?ztUrl=)
+// 3. Smart Download Endpoint
 app.get('/download', async (req, res) => {
     const inputUrl = req.query.url || req.query.driveUrl || req.query.ztUrl;
     if (!inputUrl) {
@@ -609,7 +688,6 @@ app.get('/download', async (req, res) => {
         let driveUrl = inputUrl;
         let inputType = 'driveUrl';
 
-        // Check if input is already a resolved drive/csplayer link or needs ZT resolution
         const isAlreadyResolved = inputUrl.includes('drive.csplayer') || inputUrl.includes('?ext=');
 
         if (!isAlreadyResolved) {
