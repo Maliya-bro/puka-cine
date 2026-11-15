@@ -130,7 +130,7 @@ async function resolveZtLink(ztLinkUrl, reqId) {
 }
 
 // =========================================================================
-// 2. LINUX REAL BROWSER SECTION (Fixed Args Passing)
+// 2. LINUX REAL BROWSER SECTION (Fixed Port 9222 + Low Memory Flags)
 // =========================================================================
 
 async function getUltimateR2Link(driveUrl, reqId) {
@@ -144,7 +144,13 @@ async function getUltimateR2Link(driveUrl, reqId) {
         '--disable-gpu',
         '--disable-software-rasterizer',
         '--no-zygote',
-        '--window-size=1920,1080'
+        '--disable-extensions',
+        '--disable-background-networking',
+        '--disable-sync',
+        '--mute-audio',
+        '--no-first-run',
+        '--no-default-browser-check',
+        '--window-size=1280,720'
     ];
 
     try {
@@ -154,10 +160,12 @@ async function getUltimateR2Link(driveUrl, reqId) {
             headless: false,
             turnstile: true,
             disableXvfb: true,
-            args: chromeFlags, // 🔴 puppeteer-real-browser v1.3+ සඳහා root 'args' අනිවාර්යයි
+            args: chromeFlags,
             customConfig: {
                 chromePath: '/usr/bin/google-chrome',
-                chromeFlags: chromeFlags
+                chromeFlags: chromeFlags,
+                port: 9222,
+                logLevel: 'info'
             }
         });
 
@@ -278,7 +286,6 @@ async function getUltimateR2Link(driveUrl, reqId) {
     } catch (error) {
         log(`BROWSER-ERR:${reqId}`, `💥 Exception: ${error.stack || error.message}`);
 
-        // Dump chrome-err.log from /tmp if available
         try {
             const tmpDir = os.tmpdir();
             const files = fs.readdirSync(tmpDir).filter(f => f.startsWith('lighthouse'));
