@@ -8,6 +8,8 @@ RUN apt-get update && apt-get install -y \
     procps \
     libxss1 \
     xvfb \
+    xauth \
+    dbus-x11 \
     libgbm-dev \
     libasound2 \
     libatk1.0-0 \
@@ -60,4 +62,5 @@ COPY . .
 
 EXPOSE 3000
 
-CMD ["npm", "start"]
+# Xvfb virtual display එකක් සමඟ server එක ආරම්භ කිරීම
+CMD ["xvfb-run", "--auto-servernum", "--server-args=-screen 0 1920x1080x24", "npm", "start"]
