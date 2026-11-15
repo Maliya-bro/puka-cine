@@ -1,6 +1,6 @@
 FROM node:20-slim
 
-# Chrome සහ Xvfb සඳහා අවශ්‍ය Linux dependencies install කිරීම
+# Chrome, Xvfb සහ D-Bus සඳහා අවශ්‍ය Linux dependencies install කිරීම
 RUN apt-get update && apt-get install -y \
     wget \
     gnupg \
@@ -9,6 +9,7 @@ RUN apt-get update && apt-get install -y \
     libxss1 \
     xvfb \
     xauth \
+    dbus \
     dbus-x11 \
     libgbm-dev \
     libasound2 \
@@ -53,6 +54,11 @@ RUN wget -q -O - https://dl-ssl.google.com/linux/linux_signing_key.pub | gpg --d
     && apt-get install -y google-chrome-stable --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
+# /etc/machine-id ජනනය කිරීම සහ D-Bus / X11 directories සැකසීම
+RUN dbus-uuidgen > /etc/machine-id \
+    && mkdir -p /var/run/dbus /tmp/.X11-unix \
+    && chmod 1777 /tmp/.X11-unix
+
 WORKDIR /app
 
 COPY package*.json ./
@@ -60,11 +66,9 @@ RUN npm install
 
 COPY . .
 
-# X11 socket directory එක සාදා permissions ලබා දීම
-RUN mkdir -p /tmp/.X11-unix && chmod 1777 /tmp/.X11-unix
-
 ENV DISPLAY=:99
+ENV DBUS_SESSION_BUS_ADDRESS=unix:path=/var/run/dbus/system_bus_socket
 EXPOSE 3000
 
-# Xvfb background එකේ start කර කෙලින්ම Node server එක run කිරීම
-CMD ["sh", "-c", "Xvfb :99 -screen 0 1920x1080x24 -ac +extension GLX +render -noreset & node index.js"]
+# D-Bus, Xvfb සහ Node server එක පිළිවෙලින් ආරම්භ කිරීම
+CMD ["sh", "-c", "dbus-daemon --system --fork && Xvfb :99 -screen 0 1920x1080x24 -ac +extension GLX +render -noreset & sleep 1 && node index.js"]
