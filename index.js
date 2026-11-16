@@ -380,13 +380,18 @@ async function getUltimateR2Link(driveUrl, reqId) {
         log(`BROWSER:${reqId}`, `📄 Page DOM loaded. Current Title: "${await page.title()}"`);
 
         // Loading overlay ඉවත් වෙනකම් උපරිම තත්පර 12ක් බලා සිටීම
+// Loading overlay ඉවත් වෙනකම් උපරිම තත්පර 12ක් බලා සිටීම
         log(`BROWSER:${reqId}`, `⏳ Waiting for loading screen / Turnstile to finish...`);
         for (let w = 0; w < 12; w++) {
             await delay(1000);
-            const titleNow = await page.title();
-            if (!titleNow.toLowerCase().includes('loading')) {
-                log(`BROWSER:${reqId}`, `✅ Page ready at ${w + 1}s. Title: "${titleNow}"`);
-                break;
+            try {
+                const titleNow = await page.title();
+                if (titleNow && !titleNow.toLowerCase().includes('loading')) {
+                    log(`BROWSER:${reqId}`, `✅ Page ready at ${w + 1}s. Title: "${titleNow}"`);
+                    break;
+                }
+            } catch (e) {
+                log(`BROWSER:${reqId}`, `🔄 Page navigating/redirecting at ${w + 1}s, waiting...`);
             }
         }
         await delay(1500);
