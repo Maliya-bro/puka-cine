@@ -306,29 +306,32 @@ async function getUltimateR2Link(driveUrl, reqId) {
         log(`BROWSER:${reqId}`, `✅ Chrome launched & connected successfully`);
 
         page.on('console', msg => {
-            if (msg.type() === 'error') {
+            if (msg.type() === 'error' && !msg.text().includes('ERR_FAILED')) {
                 log(`PAGE-ERR:${reqId}`, `⚠️  Browser Console Error: ${msg.text()}`);
             }
         });
 
-        page.on('pageerror', err => {
-            log(`PAGE-ERR:${reqId}`, `⚠️  Page Runtime Error: ${err.message}`);
-        });
-
+        // CDP Download Interceptor
         const client = await page.target().createCDPSession();
         await client.send('Page.setDownloadBehavior', { behavior: 'deny' });
 
         client.on('Browser.downloadWillBegin', (e) => {
-            log(`CDP:${reqId}`, `📥 Browser download event triggered: ${e.url.substring(0, 80)}...`);
-            if (e.url.includes('cloudflarestorage') || e.url.includes('X-Amz-Algorithm')) {
+            log(`CDP:${reqId}`, `📥 Browser download event triggered: ${e.url.substring(0, 100)}...`);
+            if (e.url && e.url.startsWith('http')) {
                 ultimateMediaUrl = e.url;
-                log(`CDP:${reqId}`, `🎯 R2 Presigned URL captured via CDP!`);
+                log(`CDP:${reqId}`, `🎯 Final Download URL captured via CDP!`);
             }
         });
 
+        // Anti-DevTool & Popup Ad Blocker
         await page.evaluateOnNewDocument(() => {
             window.DisableDevtool = function() { };
-            window.open = function(url) { window.location.href = url; return window; };
+            window.open = function(url) {
+                if (url && (url.includes('cloudflarestorage') || url.includes('X-Amz') || url.includes('r2.dev') || url.includes('drive.csplayer'))) {
+                    window.location.href = url;
+                }
+                return window;
+            };
             const originalAssign = window.location.assign;
             window.location.assign = function(url) {
                 if (url && (url.includes('error') || url.includes('blocked'))) return;
@@ -336,14 +339,19 @@ async function getUltimateR2Link(driveUrl, reqId) {
             };
         });
 
+        // Network Request & Redirect Response Interceptor
         await page.setRequestInterception(true);
         page.on('request', (req) => {
             const url = req.url();
             if (url.includes('disable-devtool')) {
-                log(`NET:${reqId}`, `🛡️  Blocked anti-devtool script`);
                 req.abort();
-            } else if (url.includes('X-Amz-Credential') || url.includes('cloudflarestorage.com') || url.includes('?X-Amz-Algorithm')) {
-                log(`NET:${reqId}`, `🎯 Intercepted R2/S3 request: ${url.substring(0, 80)}...`);
+            } else if (
+                url.includes('X-Amz-Credential') ||
+                url.includes('cloudflarestorage.com') ||
+                url.includes('?X-Amz-Algorithm') ||
+                url.includes('.r2.dev/')
+            ) {
+                log(`NET:${reqId}`, `🎯 Intercepted R2/S3 request: ${url.substring(0, 100)}...`);
                 if (!ultimateMediaUrl) ultimateMediaUrl = url;
                 req.abort();
             } else {
@@ -351,43 +359,102 @@ async function getUltimateR2Link(driveUrl, reqId) {
             }
         });
 
+        // Capture 302 Redirects or Attachment Downloads
+        page.on('response', (res) => {
+            const status = res.status();
+            const headers = res.headers();
+            const location = headers['location'] || '';
+            const contentDisp = headers['content-disposition'] || '';
+
+            if ((status >= 300 && status < 400) && (location.includes('X-Amz') || location.includes('cloudflarestorage') || location.includes('r2.dev'))) {
+                log(`NET-REDIR:${reqId}`, `🎯 Captured 302 Redirect to R2: ${location.substring(0, 100)}...`);
+                if (!ultimateMediaUrl) ultimateMediaUrl = location;
+            } else if (contentDisp.includes('attachment') && res.url().startsWith('http')) {
+                log(`NET-FILE:${reqId}`, `🎯 Captured Attachment Response: ${res.url().substring(0, 100)}...`);
+                if (!ultimateMediaUrl) ultimateMediaUrl = res.url();
+            }
+        });
+
         log(`BROWSER:${reqId}`, `🌐 Navigating to: ${driveUrl}`);
         await page.goto(driveUrl, { waitUntil: 'domcontentloaded', timeout: 60000 });
         log(`BROWSER:${reqId}`, `📄 Page DOM loaded. Current Title: "${await page.title()}"`);
 
-        log(`BROWSER:${reqId}`, `⏳ Waiting 6 seconds for loading overlay / Turnstile check...`);
-        await delay(6000);
+        // Loading overlay ඉවත් වෙනකම් උපරිම තත්පර 12ක් බලා සිටීම
+        log(`BROWSER:${reqId}`, `⏳ Waiting for loading screen / Turnstile to finish...`);
+        for (let w = 0; w < 12; w++) {
+            await delay(1000);
+            const titleNow = await page.title();
+            if (!titleNow.toLowerCase().includes('loading')) {
+                log(`BROWSER:${reqId}`, `✅ Page ready at ${w + 1}s. Title: "${titleNow}"`);
+                break;
+            }
+        }
+        await delay(1500);
 
-        log(`BROWSER:${reqId}`, `🔎 Scanning DOM for visible '.button.direct-download'...`);
-        const btnDebugInfo = await page.evaluate(() => {
-            const buttons = document.querySelectorAll('.button.direct-download');
-            const info = { totalButtons: buttons.length, visibleIndex: -1 };
-            for (let i = 0; i < buttons.length; i++) {
-                const style = window.getComputedStyle(buttons[i]);
-                const rect = buttons[i].getBoundingClientRect();
-                if (style.display !== 'none' && style.opacity !== '0' && rect.width > 0) {
-                    buttons[i].scrollIntoView({ behavior: 'instant', block: 'center' });
-                    info.visibleIndex = i;
-                    break;
+        // 🔴 Buttons 13ම පරීක්ෂා කර සැබෑ button එක තෝරාගැනීම
+        const scanResult = await page.evaluate(() => {
+            const buttons = Array.from(document.querySelectorAll('.button.direct-download, a.direct-download, button.direct-download'));
+            const details = buttons.map((btn, idx) => {
+                const style = window.getComputedStyle(btn);
+                const rect = btn.getBoundingClientRect();
+                const isVisible =
+                    style.display !== 'none' &&
+                    style.visibility !== 'hidden' &&
+                    parseFloat(style.opacity || '1') > 0.1 &&
+                    style.pointerEvents !== 'none' &&
+                    rect.width > 20 &&
+                    rect.height > 10;
+
+                return {
+                    idx,
+                    text: (btn.innerText || '').trim().replace(/\s+/g, ' '),
+                    href: btn.getAttribute('href') || '',
+                    id: btn.id || '',
+                    isVisible,
+                    rect: { x: rect.x, y: rect.y, width: rect.width, height: rect.height }
+                };
+            });
+
+            // Visible buttons වලින් හොඳම button එක තෝරාගැනීම
+            const visibleBtns = details.filter(d => d.isVisible);
+            const preferred =
+                visibleBtns.find(d => /direct|download/i.test(d.text) && !/telegram|ads|fast/i.test(d.text)) ||
+                visibleBtns[0] ||
+                null;
+
+            if (preferred) {
+                const targetEl = buttons[preferred.idx];
+                targetEl.scrollIntoView({ behavior: 'instant', block: 'center' });
+                const newRect = targetEl.getBoundingClientRect();
+                preferred.rect = { x: newRect.x, y: newRect.y, width: newRect.width, height: newRect.height };
+
+                // Button එක උඩ invisible ad overlay එකක් තියෙනවා නම් එය remove කිරීම
+                const centerX = newRect.x + newRect.width / 2;
+                const centerY = newRect.y + newRect.height / 2;
+                const topEl = document.elementFromPoint(centerX, centerY);
+                if (topEl && topEl !== targetEl && !targetEl.contains(topEl)) {
+                    topEl.style.pointerEvents = 'none';
+                    topEl.style.display = 'none';
                 }
             }
-            return info;
+
+            return {
+                total: buttons.length,
+                visibleCount: visibleBtns.length,
+                visibleSummary: visibleBtns.map(v => `[${v.idx}] "${v.text}" (href=${v.href})`),
+                chosen: preferred
+            };
         });
 
-        log(`BROWSER:${reqId}`, `📊 Button scan result: Total=${btnDebugInfo.totalButtons}, VisibleIndex=${btnDebugInfo.visibleIndex}`);
+        log(`BROWSER:${reqId}`, `📊 Buttons: Total=${scanResult.total}, Visible=${scanResult.visibleCount} -> ${JSON.stringify(scanResult.visibleSummary)}`);
 
-        if (btnDebugInfo.visibleIndex !== -1) {
-            await delay(1000);
-            const box = await page.evaluate((index) => {
-                const btn = document.querySelectorAll('.button.direct-download')[index];
-                const rect = btn.getBoundingClientRect();
-                return { x: rect.x, y: rect.y, width: rect.width, height: rect.height };
-            }, btnDebugInfo.visibleIndex);
-
+        if (scanResult.chosen) {
+            await delay(800);
+            const box = scanResult.chosen.rect;
             const clickX = Math.round(box.x + (box.width / 2));
             const clickY = Math.round(box.y + (box.height / 2));
 
-            log(`BROWSER:${reqId}`, `🖱️  Clicking button at X:${clickX}, Y:${clickY}...`);
+            log(`BROWSER:${reqId}`, `🖱️  Clicking chosen button [${scanResult.chosen.idx}] "${scanResult.chosen.text}" at X:${clickX}, Y:${clickY}...`);
             await page.mouse.move(clickX, clickY, { steps: 10 });
             await delay(200);
             await page.mouse.down();
@@ -395,8 +462,8 @@ async function getUltimateR2Link(driveUrl, reqId) {
             await page.mouse.up();
             log(`BROWSER:${reqId}`, `✅ Mouse click dispatched`);
         } else {
-            const bodySnippet = await page.evaluate(() => document.body.innerText.substring(0, 200).replace(/\n/g, ' '));
-            log(`BROWSER:${reqId}`, `❌ No visible download button found! Page text preview: "${bodySnippet}"`);
+            const bodySnippet = await page.evaluate(() => document.body.innerText.substring(0, 250).replace(/\n/g, ' '));
+            log(`BROWSER:${reqId}`, `❌ No valid visible download button found! Page text: "${bodySnippet}"`);
         }
 
         log(`BROWSER:${reqId}`, `⏳ Polling for R2 link (max 30s)...`);
@@ -412,7 +479,7 @@ async function getUltimateR2Link(driveUrl, reqId) {
         }
 
         if (!ultimateMediaUrl) {
-            log(`BROWSER:${reqId}`, `⚠️  Timed out after 30s without capturing R2 link.`);
+            log(`BROWSER:${reqId}`, `⚠️  Timed out after 30s without capturing R2 link. Current URL: ${page.url()}`);
         }
 
     } catch (error) {
