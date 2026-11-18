@@ -134,7 +134,6 @@ async function getMovieOrTvInfo(targetUrl, reqId) {
     const synopsis = $('.details-desc').first().text().trim() || null;
 
     if (isTvShow) {
-        // TV Show: Extract Seasons List
         const seasons = [];
         $('.season-select-box select option, .seasons-list a, .zt-season-item').each((i, el) => {
             const seasonNum = $(el).attr('value') || $(el).text().replace(/\D/g, '') || (i + 1);
@@ -146,7 +145,6 @@ async function getMovieOrTvInfo(targetUrl, reqId) {
             });
         });
 
-        // Fallback if no specific season elements found
         if (seasons.length === 0) {
             seasons.push({ season: 1, title: 'Season 1', url: `${targetUrl.replace(/\/+$/, '')}/?season=1` });
         }
@@ -158,7 +156,6 @@ async function getMovieOrTvInfo(targetUrl, reqId) {
             seasons
         };
     } else {
-        // Movie: Extract Downloads
         const rawQualities = [];
         $('.movie-download-link-item a').each((i, el) => {
             const ztUrl = $(el).attr('href');
@@ -199,27 +196,53 @@ async function getMovieOrTvInfo(targetUrl, reqId) {
     }
 }
 
-// Scrape All Episodes for a given TV Show Season URL
+// Scrape All Episodes for a given TV Show Season URL with Fallback
 async function getSeasonEpisodes(seasonUrl, reqId) {
     log(`SEASON:${reqId}`, `📺 Scraping Season Episodes from: ${seasonUrl}`);
     const { data } = await axios.get(seasonUrl, { headers: COMMON_HEADERS });
     const $ = cheerio.load(data);
 
     const episodes = [];
-    $('.episodess-item, .episode-box, .ep-item').each((i, el) => {
-        const epTitle = $(el).find('.episodess-title, .ep-title').text().trim() || `Episode ${i + 1}`;
+    
+    // Primary Selectors for CineSubz TV Show Season pages
+    $('.episodes-list-item, .episodess-item, .ep-card, .display-item .item-box, .episodess-box').each((i, el) => {
+        const epTitle = $(el).find('.episodess-title, .ep-title, h3, .item-desc-title').text().trim() || `Episode ${i + 1}`;
         const ztUrl = $(el).find('a.episodess-link, a.ep-link, a').attr('href');
-        const quality = $(el).find('.ep-quality').text().trim() || 'HD 720P';
-        const size = $(el).find('.ep-size').text().trim() || null;
+        const metaText = $(el).find('.episodess-meta, .ep-meta').text().trim();
+        
+        const qualityMatch = metaText.match(/(HD \d+P|SD|FHD|4K)/i);
+        const sizeMatch = metaText.match(/(\d+(\.\d+)?\s*(MB|GB))/i);
 
-        episodes.push({
-            episode: i + 1,
-            title: epTitle,
-            quality,
-            size,
-            ztUrl: ztUrl || null
-        });
+        if (ztUrl) {
+            episodes.push({
+                episode: i + 1,
+                title: epTitle,
+                quality: qualityMatch ? qualityMatch[0] : 'HD 720P',
+                size: sizeMatch ? sizeMatch[0] : null,
+                ztUrl
+            });
+        }
     });
+
+    // Fallback: If primary selectors miss, scan all page links for zt-links / episodes
+    if (episodes.length === 0) {
+        log(`SEASON:${reqId}`, `⚠️ Primary selectors missed. Trying fallback link extraction...`);
+        $('a').each((i, el) => {
+            const href = $(el).attr('href');
+            const text = $(el).text().trim();
+            if (href && (href.includes('/zt-links/') || href.includes('ztUrl') || text.toLowerCase().includes('episode'))) {
+                if (!episodes.some(e => e.ztUrl === href)) {
+                    episodes.push({
+                        episode: episodes.length + 1,
+                        title: text || `Episode ${episodes.length + 1}`,
+                        quality: 'HD 720P',
+                        size: null,
+                        ztUrl: href
+                    });
+                }
+            }
+        });
+    }
 
     log(`SEASON:${reqId}`, `✅ Found ${episodes.length} episodes for season`);
     return episodes;
@@ -259,7 +282,7 @@ async function getUltimateR2Link(driveUrl, reqId) {
             customConfig: {
                 chromePath: '/usr/bin/google-chrome',
                 chromeFlags: chromeFlags,
-                port: 0, // Dynamic port allocation to avoid collision
+                port: 0,
                 logLevel: 'silent'
             }
         });
@@ -316,7 +339,6 @@ async function getUltimateR2Link(driveUrl, reqId) {
 
         await page.goto(driveUrl, { waitUntil: 'domcontentloaded', timeout: 45000 });
 
-        // Wait for loading screen to clear (max 8s)
         for (let w = 0; w < 8; w++) {
             await delay(1000);
             try {
@@ -326,7 +348,6 @@ async function getUltimateR2Link(driveUrl, reqId) {
         }
         await delay(800);
 
-        // Click download button
         await page.evaluate(() => {
             const buttons = Array.from(document.querySelectorAll('.button.direct-download, a.direct-download, button.direct-download'));
             const btn = buttons.find(b => {
@@ -337,7 +358,6 @@ async function getUltimateR2Link(driveUrl, reqId) {
             if (btn) btn.click();
         });
 
-        // Poll for R2 Link (max 15s)
         for (let i = 1; i <= 15; i++) {
             if (ultimateMediaUrl) break;
             await delay(1000);
@@ -400,7 +420,6 @@ app.get('/download', async (req, res) => {
     }
 
     try {
-        // Check if input is a TV Show Season URL (e.g. ?season=1)
         const isSeasonUrl = inputUrl.includes('?season=') || inputUrl.includes('/tvshows/');
 
         if (isSeasonUrl) {
@@ -413,7 +432,6 @@ app.get('/download', async (req, res) => {
 
             log(`DOWNLOAD:${req.reqId}`, `⚡ Resolving ZT links & bypassing R2 for ${rawEpisodes.length} episodes in parallel batches...`);
 
-            // Process episodes in batches of 3 to speed up without overloading RAM
             const resolvedEpisodes = [];
             const batchSize = 3;
 
@@ -446,7 +464,6 @@ app.get('/download', async (req, res) => {
             });
         }
 
-        // Single Movie / Drive / ZT Link handling
         let driveUrl = inputUrl;
         let inputType = 'driveUrl';
 
