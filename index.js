@@ -19,6 +19,22 @@ const COMMON_HEADERS = {
     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
 };
 
+const CHROME_FLAGS = [
+    '--no-sandbox',
+    '--disable-setuid-sandbox',
+    '--disable-dev-shm-usage',
+    '--disable-gpu',
+    '--disable-software-rasterizer',
+    '--no-zygote',
+    '--disable-extensions',
+    '--disable-background-networking',
+    '--disable-sync',
+    '--mute-audio',
+    '--no-first-run',
+    '--no-default-browser-check',
+    '--window-size=1280,720'
+];
+
 app.use(express.json());
 
 // =========================================================================
@@ -41,10 +57,10 @@ app.use((req, res, next) => {
 });
 
 // =========================================================================
-// 1. SCRAPING & RESOLVING FUNCTIONS
+// 1. SCRAPING & RESOLVING FUNCTIONS (MOVIES + TV SHOWS)
 // =========================================================================
 
-async function searchMovies(query, reqId) {
+async function searchContent(query, reqId) {
     const searchUrl = `https://cinesubz.lk/?s=${encodeURIComponent(query)}`;
     log(`SEARCH:${reqId}`, `🔍 Fetching URL: ${searchUrl}`);
 
@@ -60,7 +76,10 @@ async function searchMovies(query, reqId) {
 
         if (title && url && !seenUrls.has(url)) {
             seenUrls.add(url);
-            results.push({ title, url });
+            const type = url.includes('/tvshows/')
+                ? 'TV Series'
+                : (url.includes('/episodes/') ? 'Episode' : 'Movie');
+            results.push({ title, type, url });
         }
     });
 
@@ -113,11 +132,15 @@ async function resolveZtLink(ztLinkUrl, reqId) {
     }
 }
 
-async function getMovieInfoAndQualities(movieUrl, reqId) {
-    log(`INFO:${reqId}`, `🎞️  Fetching full movie details & qualities: ${movieUrl}`);
+async function getPageInfoAndQualities(targetUrl, reqId, baseUrl = '') {
+    log(`INFO:${reqId}`, `🎞️  Fetching full details: ${targetUrl}`);
 
-    const { data } = await axios.get(movieUrl, { headers: COMMON_HEADERS });
+    const { data } = await axios.get(targetUrl, { headers: COMMON_HEADERS });
     const $ = cheerio.load(data);
+
+    const schemaType = $('.content-info').attr('itemtype') || '';
+    const isTvShow = targetUrl.includes('/tvshows/') || schemaType.includes('TVSeries') || $('#episodes-section').length > 0;
+    const isEpisode = targetUrl.includes('/episodes/');
 
     // 1. Title & Tagline
     const title = $('.details-title h3').first().text().trim()
@@ -142,7 +165,7 @@ async function getMovieInfoAndQualities(movieUrl, reqId) {
         }
     });
 
-    // 4. Synopsis / හැඳින්වීම
+    // 4. Synopsis
     const descClone = $('.details-desc').first().clone();
     descClone.find('br').replaceWith('\n');
     const synopsis = descClone.text()
@@ -197,11 +220,76 @@ async function getMovieInfoAndQualities(movieUrl, reqId) {
         }
     });
 
-    // 9. Extract Download Links & Resolve ZT Links in Parallel
+    const movieMeta = {
+        title,
+        tagline,
+        url: targetUrl,
+        poster,
+        backdrop,
+        synopsis,
+        details: {
+            imdbId,
+            imdbRating,
+            siteRating,
+            quality: qualityBadge,
+            releaseDate,
+            year,
+            duration,
+            director,
+            subtitleBy,
+            country,
+            genres
+        },
+        cast,
+        gallery
+    };
+
+    // CASE A: TV SHOW -> Extract Seasons & Season Download Links
+    if (isTvShow) {
+        const seasons = [];
+        $('.season-select ul.episodes-list').each((i, ulEl) => {
+            const seasonNum = parseInt($(ulEl).attr('data-season'), 10) || (i + 1);
+            const episodes = [];
+
+            $(ulEl).find('li a.episode-link').each((j, aEl) => {
+                const epUrl = $(aEl).attr('href');
+                const epNum = parseInt($(aEl).find('.ep-num').text().trim(), 10) || (j + 1);
+                const epTitle = $(aEl).find('.ep-title').text().trim() || `Episode ${epNum}`;
+                if (epUrl) {
+                    episodes.push({
+                        season: seasonNum,
+                        episode: epNum,
+                        title: epTitle,
+                        url: epUrl
+                    });
+                }
+            });
+
+            if (episodes.length > 0) {
+                seasons.push({
+                    season: seasonNum,
+                    episodeCount: episodes.length,
+                    seasonDownloadUrl: baseUrl
+                        ? `${baseUrl}/download?url=${encodeURIComponent(targetUrl)}&season=${seasonNum}`
+                        : null,
+                    episodes
+                });
+            }
+        });
+
+        log(`INFO:${reqId}`, `✅ TV Show parsed: ${seasons.length} seasons found`);
+        return {
+            type: 'tvshow',
+            movie: movieMeta,
+            seasons
+        };
+    }
+
+    // CASE B: MOVIE OR EPISODE -> Extract & Resolve ZT Links
     const rawQualities = [];
-    $('.movie-download-link-item a').each((i, el) => {
+    $('.movie-download-link-item a, .download-link-item a').each((i, el) => {
         const ztUrl = $(el).attr('href');
-        const metaText = $(el).find('.movie-download-meta').text().trim();
+        const metaText = $(el).find('.movie-download-meta, .download-meta').text().trim();
 
         if (ztUrl && metaText) {
             const parts = metaText.split('•').map(p => p.trim());
@@ -234,56 +322,19 @@ async function getMovieInfoAndQualities(movieUrl, reqId) {
     log(`INFO:${reqId}`, `✅ Completed full info + ${downloads.length} resolved links`);
 
     return {
-        movie: {
-            title,
-            tagline,
-            url: movieUrl,
-            poster,
-            backdrop,
-            synopsis,
-            details: {
-                imdbId,
-                imdbRating,
-                siteRating,
-                quality: qualityBadge,
-                releaseDate,
-                year,
-                duration,
-                director,
-                subtitleBy,
-                country,
-                genres
-            },
-            cast,
-            gallery
-        },
+        type: isEpisode ? 'episode' : 'movie',
+        movie: movieMeta,
         downloads
     };
 }
 
 // =========================================================================
-// 2. LINUX REAL BROWSER SECTION
+// 2A. LINUX REAL BROWSER SECTION - MOVIE SINGLE TAB (ORIGINAL UNTOUCHED)
 // =========================================================================
 
 async function getUltimateR2Link(driveUrl, reqId) {
     let browser;
     let ultimateMediaUrl = null;
-
-    const chromeFlags = [
-        '--no-sandbox',
-        '--disable-setuid-sandbox',
-        '--disable-dev-shm-usage',
-        '--disable-gpu',
-        '--disable-software-rasterizer',
-        '--no-zygote',
-        '--disable-extensions',
-        '--disable-background-networking',
-        '--disable-sync',
-        '--mute-audio',
-        '--no-first-run',
-        '--no-default-browser-check',
-        '--window-size=1280,720'
-    ];
 
     try {
         log(`BROWSER:${reqId}`, `🤖 Launching Chrome via puppeteer-real-browser (DISPLAY=${process.env.DISPLAY || 'none'})...`);
@@ -292,10 +343,10 @@ async function getUltimateR2Link(driveUrl, reqId) {
             headless: false,
             turnstile: true,
             disableXvfb: true,
-            args: chromeFlags,
+            args: CHROME_FLAGS,
             customConfig: {
                 chromePath: '/usr/bin/google-chrome',
-                chromeFlags: chromeFlags,
+                chromeFlags: CHROME_FLAGS,
                 port: 9222,
                 logLevel: 'info'
             }
@@ -379,8 +430,6 @@ async function getUltimateR2Link(driveUrl, reqId) {
         await page.goto(driveUrl, { waitUntil: 'domcontentloaded', timeout: 60000 });
         log(`BROWSER:${reqId}`, `📄 Page DOM loaded. Current Title: "${await page.title()}"`);
 
-        // Loading overlay ඉවත් වෙනකම් උපරිම තත්පර 12ක් බලා සිටීම
-// Loading overlay ඉවත් වෙනකම් උපරිම තත්පර 12ක් බලා සිටීම
         log(`BROWSER:${reqId}`, `⏳ Waiting for loading screen / Turnstile to finish...`);
         for (let w = 0; w < 12; w++) {
             await delay(1000);
@@ -396,7 +445,6 @@ async function getUltimateR2Link(driveUrl, reqId) {
         }
         await delay(1500);
 
-        // 🔴 Buttons 13ම පරීක්ෂා කර සැබෑ button එක තෝරාගැනීම
         const scanResult = await page.evaluate(() => {
             const buttons = Array.from(document.querySelectorAll('.button.direct-download, a.direct-download, button.direct-download'));
             const details = buttons.map((btn, idx) => {
@@ -420,7 +468,6 @@ async function getUltimateR2Link(driveUrl, reqId) {
                 };
             });
 
-            // Visible buttons වලින් හොඳම button එක තෝරාගැනීම
             const visibleBtns = details.filter(d => d.isVisible);
             const preferred =
                 visibleBtns.find(d => /direct|download/i.test(d.text) && !/telegram|ads|fast/i.test(d.text)) ||
@@ -433,7 +480,6 @@ async function getUltimateR2Link(driveUrl, reqId) {
                 const newRect = targetEl.getBoundingClientRect();
                 preferred.rect = { x: newRect.x, y: newRect.y, width: newRect.width, height: newRect.height };
 
-                // Button එක උඩ invisible ad overlay එකක් තියෙනවා නම් එය remove කිරීම
                 const centerX = newRect.x + newRect.width / 2;
                 const centerY = newRect.y + newRect.height / 2;
                 const topEl = document.elementFromPoint(centerX, centerY);
@@ -519,6 +565,282 @@ async function getUltimateR2Link(driveUrl, reqId) {
 }
 
 // =========================================================================
+// 2B. LINUX REAL BROWSER SECTION - TV SHOW BATCH 4-TAB POOL
+// =========================================================================
+
+async function setupAndNavigateTab(browser, task, reqId) {
+    const state = {
+        task,
+        page: null,
+        ultimateMediaUrl: null
+    };
+
+    try {
+        const page = await browser.newPage();
+        state.page = page;
+
+        // CDP Download Interceptor
+        const client = await page.target().createCDPSession();
+        await client.send('Page.setDownloadBehavior', { behavior: 'deny' });
+
+        client.on('Browser.downloadWillBegin', (e) => {
+            if (e.url && e.url.startsWith('http') && !state.ultimateMediaUrl) {
+                state.ultimateMediaUrl = e.url;
+                log(`TV-CDP:${reqId}`, `🎯 [CDP Captured] ${task.name}`);
+            }
+        });
+
+        // Anti-DevTool & Popup Ad Blocker
+        await page.evaluateOnNewDocument(() => {
+            window.DisableDevtool = function() {};
+            window.open = function(url) {
+                if (url && (url.includes('cloudflarestorage') || url.includes('X-Amz') || url.includes('r2.dev') || url.includes('drive.csplayer'))) {
+                    window.location.href = url;
+                }
+                return window;
+            };
+            const originalAssign = window.location.assign;
+            window.location.assign = function(url) {
+                if (url && (url.includes('error') || url.includes('blocked'))) return;
+                return originalAssign.apply(this, arguments);
+            };
+        });
+
+        // Network Request Interceptor
+        await page.setRequestInterception(true);
+        page.on('request', (req) => {
+            const url = req.url();
+            if (url.includes('disable-devtool')) {
+                req.abort();
+            } else if (
+                url.includes('X-Amz-Credential') ||
+                url.includes('cloudflarestorage.com') ||
+                url.includes('?X-Amz-Algorithm') ||
+                url.includes('.r2.dev/')
+            ) {
+                if (!state.ultimateMediaUrl) {
+                    state.ultimateMediaUrl = url;
+                    log(`TV-NET:${reqId}`, `🎯 [NET Captured] ${task.name}`);
+                }
+                req.abort();
+            } else {
+                req.continue();
+            }
+        });
+
+        // 302 Redirect & Attachment Interceptor
+        page.on('response', (res) => {
+            const status = res.status();
+            const headers = res.headers();
+            const location = headers['location'] || '';
+            const contentDisp = headers['content-disposition'] || '';
+
+            if ((status >= 300 && status < 400) && (location.includes('X-Amz') || location.includes('cloudflarestorage') || location.includes('r2.dev'))) {
+                if (!state.ultimateMediaUrl) {
+                    state.ultimateMediaUrl = location;
+                    log(`TV-REDIR:${reqId}`, `🎯 [302 Captured] ${task.name}`);
+                }
+            } else if (contentDisp.includes('attachment') && res.url().startsWith('http')) {
+                if (!state.ultimateMediaUrl) {
+                    state.ultimateMediaUrl = res.url();
+                    log(`TV-FILE:${reqId}`, `🎯 [File Captured] ${task.name}`);
+                }
+            }
+        });
+
+        log(`TV-TAB:${reqId}`, `🌐 [Tab Open] ${task.name}`);
+        await page.goto(task.driveUrl, { waitUntil: 'domcontentloaded', timeout: 60000 });
+    } catch (err) {
+        log(`TV-ERR:${reqId}`, `⚠️ [Load Error] ${task.name}: ${err.message}`);
+    }
+
+    return state;
+}
+
+async function findAndRealClickTvButton(state, reqId) {
+    const { page, task } = state;
+    if (!page || state.ultimateMediaUrl) return;
+
+    try {
+        await page.bringToFront();
+
+        for (let w = 0; w < 6; w++) {
+            const titleNow = await page.title().catch(() => '');
+            if (titleNow && !titleNow.toLowerCase().includes('loading')) {
+                break;
+            }
+            await delay(1000);
+        }
+        await delay(800);
+
+        const scanResult = await page.evaluate(() => {
+            // #dl-links ඇතුළේ තියෙන buttons වලට ප්‍රමුඛතාවය දෙනවා
+            const buttons = Array.from(document.querySelectorAll('#dl-links .button.direct-download, .button.direct-download, a.direct-download, button.direct-download'));
+
+            const details = buttons.map((btn, idx) => {
+                const style = window.getComputedStyle(btn);
+                const rect = btn.getBoundingClientRect();
+
+                // Cinesubz fake buttons hide කරන්න පාවිච්චි කරන CSS tricks filter කිරීම
+                const isFake =
+                    style.position === 'absolute' ||
+                    (style.clipPath && style.clipPath.includes('inset')) ||
+                    parseInt(style.zIndex || '0') < 0 ||
+                    (style.transform && (style.transform.includes('scale(0)') || style.transform.includes('translate(-100vw'))) ||
+                    parseFloat(style.fontSize) === 0;
+
+                const isVisible =
+                    !isFake &&
+                    style.display !== 'none' &&
+                    style.visibility !== 'hidden' &&
+                    parseFloat(style.opacity || '1') > 0.1 &&
+                    style.pointerEvents !== 'none' &&
+                    rect.width > 20 &&
+                    rect.height > 10;
+
+                return {
+                    idx,
+                    text: (btn.innerText || '').trim().replace(/\s+/g, ' '),
+                    isVisible,
+                    rect: { x: rect.x, y: rect.y, width: rect.width, height: rect.height }
+                };
+            });
+
+            const visibleBtns = details.filter(d => d.isVisible);
+
+            const preferred =
+                visibleBtns.find(d => /direct|download/i.test(d.text) && !/telegram|ads|fast/i.test(d.text)) ||
+                visibleBtns[0] ||
+                null;
+
+            if (preferred) {
+                const targetEl = buttons[preferred.idx];
+                targetEl.scrollIntoView({ behavior: 'instant', block: 'center' });
+
+                const newRect = targetEl.getBoundingClientRect();
+                preferred.rect = { x: newRect.x, y: newRect.y, width: newRect.width, height: newRect.height };
+
+                // Button එක උඩ තියෙන transparent ad overlays ඔක්කොම අයින් කිරීම
+                const centerX = newRect.x + newRect.width / 2;
+                const centerY = newRect.y + newRect.height / 2;
+                let topEl = document.elementFromPoint(centerX, centerY);
+                let attempts = 0;
+
+                while (topEl && topEl !== targetEl && !targetEl.contains(topEl) && attempts < 5) {
+                    topEl.style.pointerEvents = 'none';
+                    topEl.style.display = 'none';
+                    topEl = document.elementFromPoint(centerX, centerY);
+                    attempts++;
+                }
+            }
+
+            return { chosen: preferred };
+        });
+
+        if (scanResult.chosen) {
+            await delay(400);
+            const box = scanResult.chosen.rect;
+            const clickX = Math.round(box.x + (box.width / 2));
+            const clickY = Math.round(box.y + (box.height / 2));
+
+            log(`TV-CLICK:${reqId}`, `🖱️  [Click] ${task.name} -> "${scanResult.chosen.text}" (X:${clickX}, Y:${clickY})`);
+            await page.mouse.move(clickX, clickY, { steps: 10 });
+            await delay(150);
+            await page.mouse.down();
+            await delay(100);
+            await page.mouse.up();
+        } else {
+            log(`TV-WARN:${reqId}`, `❌ [No Button] ${task.name} -> Download button not found.`);
+        }
+    } catch (err) {
+        log(`TV-ERR:${reqId}`, `⚠️ [Click Error] ${task.name}: ${err.message}`);
+    }
+}
+
+async function extractTvBatchR2Links(tasks, reqId, batchSize = 4) {
+    if (tasks.length === 0) return [];
+
+    let browser;
+    const finalResults = [];
+
+    try {
+        log(`TV-BROWSER:${reqId}`, `🚀 Launching Linux Chrome for TV Show batch extraction (${tasks.length} episodes, ${batchSize} tabs/batch)...`);
+
+        const connection = await connect({
+            headless: false,
+            turnstile: true,
+            disableXvfb: true,
+            args: CHROME_FLAGS,
+            customConfig: {
+                chromePath: '/usr/bin/google-chrome',
+                chromeFlags: CHROME_FLAGS,
+                port: 9222,
+                logLevel: 'info'
+            }
+        });
+
+        browser = connection.browser;
+
+        for (let i = 0; i < tasks.length; i += batchSize) {
+            const batch = tasks.slice(i, i + batchSize);
+            const batchNum = Math.floor(i / batchSize) + 1;
+            log(`TV-BATCH:${reqId}`, `📦 Batch ${batchNum}: Opening ${batch.length} tabs...`);
+
+            const tabStates = await Promise.all(
+                batch.map(task => setupAndNavigateTab(browser, task, reqId))
+            );
+
+            log(`TV-BATCH:${reqId}`, `⏳ Waiting 6s for Turnstile & buttons to load...`);
+            await delay(6000);
+
+            for (const state of tabStates) {
+                await findAndRealClickTvButton(state, reqId);
+            }
+
+            log(`TV-BATCH:${reqId}`, `⏳ Polling for R2 links across batch ${batchNum} (max 25s)...`);
+            for (let sec = 1; sec <= 25; sec++) {
+                const allDone = tabStates.every(s => s.ultimateMediaUrl !== null);
+                if (allDone) {
+                    log(`TV-BATCH:${reqId}`, `🎉 Batch ${batchNum} completed all ${batch.length} links in ${sec}s!`);
+                    break;
+                }
+                await delay(1000);
+            }
+
+            for (const state of tabStates) {
+                if (state.page) {
+                    try { await state.page.close(); } catch (e) {}
+                }
+                finalResults.push({
+                    season: state.task.season,
+                    episode: state.task.episode,
+                    title: state.task.title,
+                    label: state.task.label,
+                    size: state.task.size,
+                    driveUrl: state.task.driveUrl,
+                    downloadUrl: state.ultimateMediaUrl || null,
+                    success: Boolean(state.ultimateMediaUrl)
+                });
+            }
+
+            log(`TV-BATCH:${reqId}`, `🧹 Closed ${batch.length} tabs for Batch ${batchNum}`);
+        }
+    } catch (error) {
+        log(`TV-BROWSER-ERR:${reqId}`, `💥 Batch Browser Exception: ${error.stack || error.message}`);
+    } finally {
+        if (browser) {
+            log(`TV-BROWSER:${reqId}`, `🛑 Closing Chrome instance...`);
+            try {
+                await browser.close();
+            } catch (e) {}
+        }
+    }
+
+    finalResults.sort((a, b) => a.episode - b.episode);
+    return finalResults;
+}
+
+// =========================================================================
 // 3. API ENDPOINTS & FULL DOCUMENTATION GUIDE (/)
 // =========================================================================
 
@@ -531,9 +853,10 @@ app.get('/', (req, res) => {
             baseUrl,
             endpoints: {
                 search: `${baseUrl}/search?q=spider-man`,
-                infoAndQualities: `${baseUrl}/qualities?url=MOVIE_URL`,
-                downloadWithDriveUrl: `${baseUrl}/download?url=DRIVE_URL`,
-                downloadWithZtUrl: `${baseUrl}/download?ztUrl=ZT_URL`
+                infoAndQualities: `${baseUrl}/qualities?url=MOVIE_OR_TVSHOW_URL`,
+                downloadMovieDriveUrl: `${baseUrl}/download?url=DRIVE_URL`,
+                downloadMovieZtUrl: `${baseUrl}/download?ztUrl=ZT_URL`,
+                downloadTvShowSeason: `${baseUrl}/download?url=TVSHOW_URL&season=1`
             }
         });
     }
@@ -563,7 +886,7 @@ app.get('/', (req, res) => {
         table { width: 100%; border-collapse: collapse; margin: 0.75rem 0; font-size: 0.9rem; }
         th, td { text-align: left; padding: 0.6rem; border-bottom: 1px solid var(--border); }
         th { color: var(--accent); }
-        .note { background: rgba(56, 189, 248, 0.1); border-left: 3px solid var(--accent); padding: 0.75rem 1rem; border-radius: 4px; font-size: 0.9rem; color: #cbd5e1; }
+        .note { background: rgba(56, 189, 248, 0.1); border-left: 3px solid var(--accent); padding: 0.75rem 1rem; border-radius: 4px; font-size: 0.9rem; color: #cbd5e1; margin-bottom: 0.75rem; }
     </style>
 </head>
 <body>
@@ -573,7 +896,7 @@ app.get('/', (req, res) => {
             <h1>🎬 CineSubz Scraper & R2 Bypass API</h1>
             <p style="margin:0; margin-top:4px;">Base URL: <code>${baseUrl}</code></p>
         </div>
-        <span class="badge">● SYSTEM ONLINE</span>
+        <span class="badge">● SYSTEM ONLINE (MOVIES + TV SHOWS)</span>
     </header>
 
     <div class="card">
@@ -581,130 +904,46 @@ app.get('/', (req, res) => {
             <span class="method">GET</span>
             <span class="path">/search?q={query}</span>
         </div>
-        <p>Search movies or TV series by name. Returns title and movie page URL.</p>
+        <p>Search movies or TV series by name. Returns title, content type (<code>Movie</code> / <code>TV Series</code>), and page URL.</p>
         <table>
             <tr><th>Parameter</th><th>Required</th><th>Description</th></tr>
-            <tr><td><code>q</code></td><td>Yes</td><td>Movie or TV series name to search (e.g., <code>spider man</code>)</td></tr>
+            <tr><td><code>q</code></td><td>Yes</td><td>Movie or TV series name to search (e.g., <code>loki</code>)</td></tr>
         </table>
         <span class="label">Example Request</span>
-        <pre>${baseUrl}/search?q=spider man</pre>
-        <span class="label">Example Response</span>
-        <pre>{
-  "success": true,
-  "count": 28,
-  "results": [
-    {
-      "title": "Spider-Man: Brand New Day (2026) Sinhala Subtitles | සිංහල උපසිරැසි සමඟ",
-      "url": "https://cinesubz.lk/movies/spider-man-brand-new-day-2026-sinhala-subtitles/"
-    }
-  ]
-}</pre>
+        <pre>${baseUrl}/search?q=loki</pre>
     </div>
 
     <div class="card">
         <div class="endpoint-header">
             <span class="method">GET</span>
-            <span class="path">/qualities?url={movieUrl}</span>
+            <span class="path">/qualities?url={movieOrTvUrl}</span>
             <span style="color:#94a3b8; font-size:0.85rem;">(Alias: <code>/info</code>)</span>
         </div>
-        <p>Extracts full movie details (main poster, Sinhala synopsis, IMDb rating, cast, gallery images) AND automatically resolves all ZT download links into direct <code>driveUrl</code> links in parallel.</p>
+        <p>Extracts full metadata (poster, synopsis, IMDb rating, cast, gallery). For <strong>Movies</strong>, resolves all ZT links into <code>driveUrl</code>. For <strong>TV Shows</strong>, extracts all <code>seasons</code> with episode lists and ready-to-use <code>seasonDownloadUrl</code> links.</p>
         <table>
             <tr><th>Parameter</th><th>Required</th><th>Description</th></tr>
-            <tr><td><code>url</code></td><td>Yes</td><td>Movie page URL obtained from <code>/search</code></td></tr>
+            <tr><td><code>url</code></td><td>Yes</td><td>Movie or TV Series page URL obtained from <code>/search</code></td></tr>
         </table>
-        <span class="label">Example Request</span>
-        <pre>${baseUrl}/qualities?url=https://cinesubz.lk/movies/spider-man-brand-new-day-2026-sinhala-subtitles/</pre>
-        <span class="label">Example Response</span>
-        <pre>{
-  "success": true,
-  "movie": {
-    "title": "Spider-Man: Brand New Day (2026) Sinhala Subtitles | සිංහල උපසිරැසි සමඟ",
-    "tagline": "අලුත්ම දවසක්",
-    "url": "https://cinesubz.lk/movies/spider-man-brand-new-day-2026-sinhala-subtitles/",
-    "poster": "https://cinesubz.lk/wp-content/uploads/2026/08/Spider-Man-WEB-1.jpg",
-    "backdrop": "https://image.tmdb.org/t/p/original/qeQJx07rK2xm8SD2sJxFKhE7gs0.jpg",
-    "synopsis": "“ස්පයිඩර්-මෑන්: බ්‍රෑන්ඩ් නිව් ඩේ” පටන්ගන්නේ...",
-    "details": {
-      "imdbId": "tt22084616",
-      "imdbRating": "8.2",
-      "siteRating": "4.7",
-      "quality": "WEB-DL",
-      "releaseDate": "July 29, 2026",
-      "year": "2026",
-      "duration": "145 min",
-      "director": "Destin Daniel Cretton",
-      "subtitleBy": "බ්‍රයන් (Cineru.lk)",
-      "country": "United States, Canada, United Kingdom, Germany",
-      "genres": ["Action", "Adventure", "English", "Science Fiction"]
-    },
-    "cast": [
-      {
-        "name": "Tom Holland",
-        "character": "Peter Parker / Spider-Man",
-        "image": "https://image.tmdb.org/t/p/w185/xKBAaPIa1c7tzZD3Y0MhBLv4hPE.jpg"
-      }
-    ],
-    "gallery": [
-      "https://image.tmdb.org/t/p/original/qeQJx07rK2xm8SD2sJxFKhE7gs0.jpg"
-    ]
-  },
-  "downloads": [
-    {
-      "label": "WEB-DL 480p • 800 MB • English",
-      "quality": "WEB-DL 480p",
-      "size": "800 MB",
-      "language": "English",
-      "ztUrl": "https://cinesubz.lk/zt-links/nvm2e3d9ep/",
-      "driveUrl": "https://drive.csplayer2.space/server4/new/Spider-Man...480p?ext=mp4"
-    }
-  ]
-}</pre>
+        <span class="label">Example Request (TV Show)</span>
+        <pre>${baseUrl}/info?url=https://cinesubz.lk/tvshows/loki-2021-sinhala-subtitles/</pre>
     </div>
 
     <div class="card">
         <div class="endpoint-header">
             <span class="method">GET</span>
-            <span class="path">/download?url={driveUrl_or_ztUrl}</span>
+            <span class="path">/download?url={driveUrl_ztUrl_or_tvShowUrl}</span>
         </div>
-        <p>Bypasses Cloudflare & anti-bot protections using Real Chrome and extracts the final Cloudflare R2 / S3 presigned direct download link.</p>
+        <p>Automatically detects whether the input is a <strong>Movie link</strong> or a <strong>TV Show Season URL</strong> and extracts the final Cloudflare R2 direct download links.</p>
         <div class="note">
-            <strong>Smart Link Detection:</strong> Pass either the pre-resolved <code>driveUrl</code> (faster) OR the raw <code>ztUrl</code> using <code>?url=</code>, <code>?driveUrl=</code>, or <code>?ztUrl=</code>.
+            <strong>TV Show Batch Mode:</strong> Pass a TV Show URL with <code>&season=1</code>. Resolves all episodes' ZT links in parallel first, then opens Chrome in 4-tab batches to extract all direct R2 links.
         </div>
         <table>
             <tr><th>Parameter</th><th>Required</th><th>Description</th></tr>
-            <tr><td><code>url</code> (or <code>driveUrl</code> / <code>ztUrl</code>)</td><td>Yes</td><td>Either <code>driveUrl</code> or <code>ztUrl</code> from <code>/qualities</code></td></tr>
+            <tr><td><code>url</code></td><td>Yes</td><td>Movie <code>driveUrl</code>, <code>ztUrl</code>, Episode URL, or TV Show URL</td></tr>
+            <tr><td><code>season</code></td><td>Optional</td><td>Season number for TV Shows (defaults to Season 1)</td></tr>
         </table>
-        <span class="label">Example Request (Using pre-resolved driveUrl)</span>
-        <pre>${baseUrl}/download?url=https://drive.csplayer2.space/server4/new/Spider-Man...480p?ext=mp4</pre>
-        <span class="label">Example Response</span>
-        <pre>{
-  "success": true,
-  "inputType": "driveUrl",
-  "driveUrl": "https://drive.csplayer2.space/server4/new/Spider-Man...480p?ext=mp4",
-  "downloadUrl": "https://pub-xxxx.r2.cloudflarestorage.com/movie.mp4?X-Amz-Algorithm=..."
-}</pre>
-    </div>
-
-    <div class="card">
-        <h3 style="margin-bottom: 0.75rem; color: var(--accent);">⚡ Node.js / Bot Integration Example</h3>
-        <pre>import axios from 'axios';
-
-const API = '${baseUrl}';
-
-// 1. Search Movie
-const { data: searchData } = await axios.get(\`\${API}/search\`, { params: { q: 'spider man' } });
-const movieUrl = searchData.results[0].url;
-
-// 2. Get Full Movie Info + Resolved Drive Links
-const { data: infoData } = await axios.get(\`\${API}/qualities\`, { params: { url: movieUrl } });
-console.log(infoData.movie.title);
-console.log(infoData.movie.poster);
-console.log(infoData.movie.synopsis);
-
-// 3. Get Final R2 Direct Download Link (Pass driveUrl directly)
-const selected = infoData.downloads[0];
-const { data: dlData } = await axios.get(\`\${API}/download\`, { params: { url: selected.driveUrl } });
-console.log('Direct R2 Link:', dlData.downloadUrl);</pre>
+        <span class="label">Example TV Show Season Request</span>
+        <pre>${baseUrl}/download?url=https://cinesubz.lk/tvshows/loki-2021-sinhala-subtitles/&season=1</pre>
     </div>
 </div>
 </body>
@@ -719,7 +958,7 @@ app.get('/search', async (req, res) => {
         return res.status(400).json({ success: false, error: 'Query parameter "q" is required' });
     }
     try {
-        const results = await searchMovies(query, req.reqId);
+        const results = await searchContent(query, req.reqId);
         res.json({ success: true, count: results.length, results });
     } catch (e) {
         log(`ERR:${req.reqId}`, `Search failed: ${e.message}`);
@@ -727,15 +966,16 @@ app.get('/search', async (req, res) => {
     }
 });
 
-// 2. Movie Info + Resolved Qualities Endpoint
+// 2. Movie & TV Show Info + Qualities/Seasons Endpoint
 app.get(['/qualities', '/info'], async (req, res) => {
-    const movieUrl = req.query.url;
-    if (!movieUrl) {
+    const targetUrl = req.query.url;
+    if (!targetUrl) {
         log(`WARN:${req.reqId}`, `Missing query parameter "url"`);
         return res.status(400).json({ success: false, error: 'Query parameter "url" is required' });
     }
     try {
-        const data = await getMovieInfoAndQualities(movieUrl, req.reqId);
+        const baseUrl = `${req.protocol}://${req.get('host')}`;
+        const data = await getPageInfoAndQualities(targetUrl, req.reqId, baseUrl);
         res.json({ success: true, ...data });
     } catch (e) {
         log(`ERR:${req.reqId}`, `Info/Qualities fetch failed: ${e.message}`);
@@ -743,7 +983,7 @@ app.get(['/qualities', '/info'], async (req, res) => {
     }
 });
 
-// 3. Smart Download Endpoint
+// 3. Smart Download Endpoint (Movies + TV Show Seasons + Episodes)
 app.get('/download', async (req, res) => {
     const inputUrl = req.query.url || req.query.driveUrl || req.query.ztUrl;
     if (!inputUrl) {
@@ -755,6 +995,110 @@ app.get('/download', async (req, res) => {
     }
 
     try {
+        // =================================================================
+        // BRANCH 1: TV SHOW SEASON BATCH DOWNLOAD (/tvshows/...)
+        // =================================================================
+        if (inputUrl.includes('/tvshows/')) {
+            const requestedSeason = parseInt(req.query.season, 10) || 1;
+
+            log(`TV-DL:${req.reqId}`, `📺 TV Show detected! Fetching Season ${requestedSeason} episodes...`);
+
+            const showData = await getPageInfoAndQualities(inputUrl, req.reqId);
+            if (!showData.seasons || showData.seasons.length === 0) {
+                return res.status(404).json({ success: false, error: 'No seasons or episodes found for this TV show' });
+            }
+
+            const selectedSeason = showData.seasons.find(s => s.season === requestedSeason) || showData.seasons[0];
+            log(`TV-DL:${req.reqId}`, `⚡ Resolving ZT links for all ${selectedSeason.episodes.length} episodes in Season ${selectedSeason.season}...`);
+
+            // සියලුම episodes වල ZT links මුලින්ම resolve කර Drive links ලබාගැනීම
+            const resolvedEpisodes = await Promise.all(
+                selectedSeason.episodes.map(async (ep) => {
+                    const epInfo = await getPageInfoAndQualities(ep.url, req.reqId);
+                    const validDownloads = (epInfo.downloads || []).filter(d => d.driveUrl);
+
+                    if (validDownloads.length === 0) {
+                        log(`TV-DL:${reqId}`, `⚠️ No valid Drive links for S${ep.season}E${ep.episode}`);
+                        return null;
+                    }
+
+                    const chosenDl = validDownloads[0];
+
+                    return {
+                        season: ep.season,
+                        episode: ep.episode,
+                        title: ep.title,
+                        label: chosenDl.label,
+                        size: chosenDl.size,
+                        name: `S${String(ep.season).padStart(2, '0')}E${String(ep.episode).padStart(2, '0')} - ${ep.title}`,
+                        driveUrl: chosenDl.driveUrl
+                    };
+                })
+            );
+
+            const tasksToProcess = resolvedEpisodes.filter(Boolean);
+
+            if (tasksToProcess.length === 0) {
+                return res.status(404).json({ success: false, error: 'Could not resolve any Drive links for this season' });
+            }
+
+            log(`TV-DL:${req.reqId}`, `✅ Resolved ${tasksToProcess.length}/${selectedSeason.episodes.length} episode Drive links. Starting 4-tab Chrome extraction...`);
+
+            const episodeResults = await extractTvBatchR2Links(tasksToProcess, req.reqId, 4);
+
+            log(`SUCCESS:${req.reqId}`, `🚀 Sending ${episodeResults.length} TV Show episode R2 links to client`);
+            return res.json({
+                success: true,
+                type: 'tvshow',
+                title: showData.movie.title,
+                season: selectedSeason.season,
+                totalEpisodes: episodeResults.length,
+                episodes: episodeResults
+            });
+        }
+
+        // =================================================================
+        // BRANCH 2: SINGLE EPISODE PAGE URL (/episodes/...)
+        // =================================================================
+        if (inputUrl.includes('/episodes/')) {
+            log(`EP-DL:${req.reqId}`, `🎞️ Single Episode page detected! Resolving ZT link...`);
+
+            const epInfo = await getPageInfoAndQualities(inputUrl, req.reqId);
+            const validDownloads = (epInfo.downloads || []).filter(d => d.driveUrl);
+
+            if (validDownloads.length === 0) {
+                return res.status(404).json({ success: false, error: 'No valid Drive links found for this episode' });
+            }
+
+            const chosenDl = validDownloads[0];
+
+            const [epResult] = await extractTvBatchR2Links([{
+                season: null,
+                episode: 1,
+                title: epInfo.movie.title,
+                label: chosenDl.label,
+                size: chosenDl.size,
+                name: epInfo.movie.title,
+                driveUrl: chosenDl.driveUrl
+            }], req.reqId, 1);
+
+            if (!epResult || !epResult.downloadUrl) {
+                return res.status(500).json({ success: false, error: 'Failed to extract R2 link for episode' });
+            }
+
+            return res.json({
+                success: true,
+                type: 'episode',
+                title: epInfo.movie.title,
+                label: chosenDl.label,
+                driveUrl: chosenDl.driveUrl,
+                downloadUrl: epResult.downloadUrl
+            });
+        }
+
+        // =================================================================
+        // BRANCH 3: MOVIE DIRECT DOWNLOAD (ORIGINAL LOGIC UNTOUCHED)
+        // =================================================================
         let driveUrl = inputUrl;
         let inputType = 'driveUrl';
 
@@ -779,6 +1123,7 @@ app.get('/download', async (req, res) => {
         log(`SUCCESS:${req.reqId}`, `🚀 Sending final R2 URL to client`);
         res.json({
             success: true,
+            type: 'movie',
             inputType,
             driveUrl,
             downloadUrl: finalLink
