@@ -37,8 +37,8 @@ const CHROME_FLAGS = [
 
 app.use(express.json());
 
-// Helper: Extract real image URL bypassing LiteSpeed base64 lazy-load placeholders
-function extractRealImage($el) {
+// Helper: Extract real thumbnail URL bypassing LiteSpeed base64 lazy-load
+function extractRealThumbnail($el) {
     if (!$el || !$el.length) return null;
     const candidates = [
         $el.attr('data-src'),
@@ -90,14 +90,13 @@ async function searchContent(query, reqId) {
         const anchor = $(el).find('> a').first();
         const title = anchor.attr('title')?.trim() || $(el).find('.item-desc-title h3').text().trim();
         const url = anchor.attr('href');
-        const thumbnail = extractRealImage($(el).find('img').first());
 
         if (title && url && !seenUrls.has(url)) {
             seenUrls.add(url);
             const type = url.includes('/tvshows/')
                 ? 'TV Series'
                 : (url.includes('/episodes/') ? 'Episode' : 'Movie');
-            results.push({ title, type, thumbnail, url });
+            results.push({ title, type, url });
         }
     });
 
@@ -167,10 +166,10 @@ async function getPageInfoAndQualities(targetUrl, reqId, baseUrl = '', includeEp
 
     const tagline = $('.movie-tagline-box .tagline-text').first().text().trim() || null;
 
-    // 2. Main Thumbnail / Poster Image ONLY (Bypasses base64 lazy-load)
-    let poster = extractRealImage($('.content-poster img.poster-img').first())
-        || extractRealImage($('.content-poster img').first())
-        || extractRealImage($('.poster img').first());
+    // 2. Main Poster / Thumbnail Image ONLY (Bypassing lazy-load base64)
+    let poster = extractRealThumbnail($('.content-poster img.poster-img').first())
+        || extractRealThumbnail($('.content-poster img').first())
+        || extractRealThumbnail($('.poster img').first());
 
     if (!poster) {
         const ogImage = $('meta[property="og:image"]').last().attr('content');
@@ -236,7 +235,7 @@ async function getPageInfoAndQualities(targetUrl, reqId, baseUrl = '', includeEp
         else if (label.includes('country')) country = value || null;
     });
 
-    // 7. Cast List (Without extra images)
+    // 7. Cast List (Without extra cast images)
     const cast = [];
     $('.zt-cast-card').each((i, el) => {
         const name = $(el).find('.zt-cast-name').text().trim();
@@ -250,7 +249,7 @@ async function getPageInfoAndQualities(targetUrl, reqId, baseUrl = '', includeEp
         title,
         tagline,
         url: targetUrl,
-        thumbnail: poster,
+        poster,
         synopsis,
         details: {
             imdbId,
@@ -268,7 +267,7 @@ async function getPageInfoAndQualities(targetUrl, reqId, baseUrl = '', includeEp
         cast
     };
 
-    // CASE A: TV SHOW -> Extract ONLY Season Links (No individual episode links in /qualities)
+    // CASE A: TV SHOW -> Extract Seasons & Season Download Links (Only include episodes if requested internally by /download)
     if (isTvShow) {
         const seasons = [];
         $('.season-select ul.episodes-list').each((i, ulEl) => {
@@ -290,29 +289,26 @@ async function getPageInfoAndQualities(targetUrl, reqId, baseUrl = '', includeEp
             });
 
             if (episodes.length > 0) {
-                const seasonObj = {
+                const seasonData = {
                     season: seasonNum,
-                    title: `Season ${seasonNum}`,
                     episodeCount: episodes.length,
-                    downloadUrl: baseUrl
+                    seasonDownloadUrl: baseUrl
                         ? `${baseUrl}/download?url=${encodeURIComponent(targetUrl)}&season=${seasonNum}`
-                        : `${targetUrl}?season=${seasonNum}`
+                        : null
                 };
 
-                // Only attach episodes array if explicitly requested internally by /download
                 if (includeEpisodes) {
-                    seasonObj.episodes = episodes;
+                    seasonData.episodes = episodes;
                 }
 
-                seasons.push(seasonObj);
+                seasons.push(seasonData);
             }
         });
 
         log(`INFO:${reqId}`, `✅ TV Show parsed: ${seasons.length} seasons found`);
         return {
             type: 'tvshow',
-            ...movieMeta,
-            totalSeasons: seasons.length,
+            movie: movieMeta,
             seasons
         };
     }
@@ -355,7 +351,7 @@ async function getPageInfoAndQualities(targetUrl, reqId, baseUrl = '', includeEp
 
     return {
         type: isEpisode ? 'episode' : 'movie',
-        ...movieMeta,
+        movie: movieMeta,
         downloads
     };
 }
@@ -597,7 +593,7 @@ async function getUltimateR2Link(driveUrl, reqId) {
 }
 
 // =========================================================================
-// 2B. LINUX REAL BROWSER SECTION - TV SHOW BATCH 4-TAB POOL
+// 2B. LINUX REAL BROWSER SECTION - TV SHOW BATCH 4-TAB POOL (ORIGINAL UNTOUCHED)
 // =========================================================================
 
 async function setupAndNavigateTab(browser, task, reqId) {
@@ -933,7 +929,7 @@ app.get('/', (req, res) => {
             <span class="method">GET</span>
             <span class="path">/search?q={query}</span>
         </div>
-        <p>Search movies or TV series by name. Returns title, content type (<code>Movie</code> / <code>TV Series</code>), thumbnail, and page URL.</p>
+        <p>Search movies or TV series by name. Returns title, content type (<code>Movie</code> / <code>TV Series</code>), and page URL.</p>
         <table>
             <tr><th>Parameter</th><th>Required</th><th>Description</th></tr>
             <tr><td><code>q</code></td><td>Yes</td><td>Movie or TV series name to search (e.g., <code>loki</code>)</td></tr>
@@ -948,13 +944,13 @@ app.get('/', (req, res) => {
             <span class="path">/qualities?url={movieOrTvUrl}</span>
             <span style="color:#94a3b8; font-size:0.85rem;">(Alias: <code>/info</code>)</span>
         </div>
-        <p>Extracts metadata and main thumbnail. For <strong>Movies</strong>, resolves all ZT links into <code>driveUrl</code>. For <strong>TV Shows</strong>, extracts only <code>seasons</code> download links without individual episode links.</p>
+        <p>Extracts full metadata (poster, synopsis, IMDb rating, cast). For <strong>Movies</strong>, resolves all ZT links into <code>driveUrl</code>. For <strong>TV Shows</strong>, extracts all <code>seasons</code> with ready-to-use <code>seasonDownloadUrl</code> links.</p>
         <table>
             <tr><th>Parameter</th><th>Required</th><th>Description</th></tr>
             <tr><td><code>url</code></td><td>Yes</td><td>Movie or TV Series page URL obtained from <code>/search</code></td></tr>
         </table>
         <span class="label">Example Request (TV Show)</span>
-        <pre>${baseUrl}/qualities?url=https://cinesubz.lk/tvshows/loki-2021-sinhala-subtitles/</pre>
+        <pre>${baseUrl}/info?url=https://cinesubz.lk/tvshows/loki-2021-sinhala-subtitles/</pre>
     </div>
 
     <div class="card">
@@ -1004,7 +1000,6 @@ app.get(['/qualities', '/info'], async (req, res) => {
     }
     try {
         const baseUrl = `${req.protocol}://${req.get('host')}`;
-        // includeEpisodes = false -> returns ONLY season links for TV Shows
         const data = await getPageInfoAndQualities(targetUrl, req.reqId, baseUrl, false);
         res.json({ success: true, ...data });
     } catch (e) {
@@ -1033,7 +1028,6 @@ app.get('/download', async (req, res) => {
 
             log(`TV-DL:${req.reqId}`, `📺 TV Show detected! Fetching Season ${requestedSeason} episodes...`);
 
-            // includeEpisodes = true -> needed internally to resolve each episode's ZT link
             const showData = await getPageInfoAndQualities(inputUrl, req.reqId, '', true);
             if (!showData.seasons || showData.seasons.length === 0) {
                 return res.status(404).json({ success: false, error: 'No seasons or episodes found for this TV show' });
@@ -1042,6 +1036,7 @@ app.get('/download', async (req, res) => {
             const selectedSeason = showData.seasons.find(s => s.season === requestedSeason) || showData.seasons[0];
             log(`TV-DL:${req.reqId}`, `⚡ Resolving ZT links for all ${selectedSeason.episodes.length} episodes in Season ${selectedSeason.season}...`);
 
+            // සියලුම episodes වල ZT links මුලින්ම resolve කර Drive links ලබාගැනීම
             const resolvedEpisodes = await Promise.all(
                 selectedSeason.episodes.map(async (ep) => {
                     const epInfo = await getPageInfoAndQualities(ep.url, req.reqId);
@@ -1080,8 +1075,7 @@ app.get('/download', async (req, res) => {
             return res.json({
                 success: true,
                 type: 'tvshow',
-                title: showData.title,
-                thumbnail: showData.thumbnail,
+                title: showData.movie.title,
                 season: selectedSeason.season,
                 totalEpisodes: episodeResults.length,
                 episodes: episodeResults
@@ -1106,10 +1100,10 @@ app.get('/download', async (req, res) => {
             const [epResult] = await extractTvBatchR2Links([{
                 season: null,
                 episode: 1,
-                title: epInfo.title,
+                title: epInfo.movie.title,
                 label: chosenDl.label,
                 size: chosenDl.size,
-                name: epInfo.title,
+                name: epInfo.movie.title,
                 driveUrl: chosenDl.driveUrl
             }], req.reqId, 1);
 
@@ -1120,8 +1114,7 @@ app.get('/download', async (req, res) => {
             return res.json({
                 success: true,
                 type: 'episode',
-                title: epInfo.title,
-                thumbnail: epInfo.thumbnail,
+                title: epInfo.movie.title,
                 label: chosenDl.label,
                 driveUrl: chosenDl.driveUrl,
                 downloadUrl: epResult.downloadUrl
