@@ -37,6 +37,23 @@ const CHROME_FLAGS = [
 
 app.use(express.json());
 
+// Helper: Extract real image URL bypassing LiteSpeed base64 lazy-load placeholders
+function extractRealImage($el) {
+    if (!$el || !$el.length) return null;
+    const candidates = [
+        $el.attr('data-src'),
+        $el.attr('data-original'),
+        $el.attr('data-lazy-src'),
+        $el.attr('src')
+    ];
+    for (const url of candidates) {
+        if (url && url.startsWith('http') && !url.startsWith('data:image')) {
+            return url.trim();
+        }
+    }
+    return null;
+}
+
 // =========================================================================
 // 0. REQUEST LOGGER MIDDLEWARE
 // =========================================================================
@@ -73,13 +90,14 @@ async function searchContent(query, reqId) {
         const anchor = $(el).find('> a').first();
         const title = anchor.attr('title')?.trim() || $(el).find('.item-desc-title h3').text().trim();
         const url = anchor.attr('href');
+        const thumbnail = extractRealImage($(el).find('img').first());
 
         if (title && url && !seenUrls.has(url)) {
             seenUrls.add(url);
             const type = url.includes('/tvshows/')
                 ? 'TV Series'
                 : (url.includes('/episodes/') ? 'Episode' : 'Movie');
-            results.push({ title, type, url });
+            results.push({ title, type, thumbnail, url });
         }
     });
 
@@ -132,7 +150,7 @@ async function resolveZtLink(ztLinkUrl, reqId) {
     }
 }
 
-async function getPageInfoAndQualities(targetUrl, reqId, baseUrl = '') {
+async function getPageInfoAndQualities(targetUrl, reqId, baseUrl = '', includeEpisodes = false) {
     log(`INFO:${reqId}`, `🎞️  Fetching full details: ${targetUrl}`);
 
     const { data } = await axios.get(targetUrl, { headers: COMMON_HEADERS });
@@ -149,23 +167,32 @@ async function getPageInfoAndQualities(targetUrl, reqId, baseUrl = '') {
 
     const tagline = $('.movie-tagline-box .tagline-text').first().text().trim() || null;
 
-    // 2. Main Poster Image
-    const poster = $('.content-poster img.poster-img').first().attr('src')
-        || $('.content-poster img').first().attr('data-src')
-        || $('meta[property="og:image"]').last().attr('content')
-        || null;
+    // 2. Main Thumbnail / Poster Image ONLY (Bypasses base64 lazy-load)
+    let poster = extractRealImage($('.content-poster img.poster-img').first())
+        || extractRealImage($('.content-poster img').first())
+        || extractRealImage($('.poster img').first());
 
-    // 3. Backdrop & Gallery Screenshots
-    const backdrop = $('.player-splash .splash-bg img').first().attr('src') || null;
-    const gallery = [];
-    $('.content-gall .gall-item a').each((i, el) => {
-        const href = $(el).attr('href');
-        if (href && href.startsWith('http') && !gallery.includes(href)) {
-            gallery.push(href);
+    if (!poster) {
+        const ogImage = $('meta[property="og:image"]').last().attr('content');
+        if (ogImage && ogImage.startsWith('http') && !ogImage.includes('loho.png')) {
+            poster = ogImage.trim();
         }
-    });
+    }
 
-    // 4. Synopsis
+    if (!poster) {
+        $('script[type="application/ld+json"]').each((i, el) => {
+            if (poster) return;
+            try {
+                const jsonText = $(el).html();
+                const match = jsonText.match(/"thumbnailUrl"\s*:\s*"([^"]+)"/);
+                if (match && match[1]) {
+                    poster = match[1].replace(/\\\//g, '/');
+                }
+            } catch (e) {}
+        });
+    }
+
+    // 3. Synopsis
     const descClone = $('.details-desc').first().clone();
     descClone.find('br').replaceWith('\n');
     const synopsis = descClone.text()
@@ -174,7 +201,7 @@ async function getPageInfoAndQualities(targetUrl, reqId, baseUrl = '') {
         .filter(line => line.length > 0)
         .join('\n\n') || null;
 
-    // 5. Ratings, Duration, Release Date, Quality, IMDb ID
+    // 4. Ratings, Duration, Release Date, Quality, IMDb ID
     const imdbId = $('.imdb-data').attr('data-imdb') || null;
     const imdbText = $('.data-imdb').text().replace(/\s+/g, ' ').trim();
     const imdbMatch = imdbText.match(/IMDb:\s*([\d.]+)/i);
@@ -185,7 +212,7 @@ async function getPageInfoAndQualities(targetUrl, reqId, baseUrl = '') {
     const duration = $('.details-data span[itemprop="duration"]').first().text().trim() || null;
     const releaseDate = $('meta[itemprop="dateCreated"]').attr('content')?.trim() || null;
 
-    // 6. Genres
+    // 5. Genres
     const genres = [];
     $('.details-genre a').each((i, el) => {
         const g = $(el).text().trim();
@@ -194,7 +221,7 @@ async function getPageInfoAndQualities(targetUrl, reqId, baseUrl = '') {
         }
     });
 
-    // 7. Extra Info
+    // 6. Extra Info
     let director = null;
     let year = null;
     let subtitleBy = null;
@@ -209,14 +236,13 @@ async function getPageInfoAndQualities(targetUrl, reqId, baseUrl = '') {
         else if (label.includes('country')) country = value || null;
     });
 
-    // 8. Cast List
+    // 7. Cast List (Without extra images)
     const cast = [];
     $('.zt-cast-card').each((i, el) => {
         const name = $(el).find('.zt-cast-name').text().trim();
         const character = $(el).find('.zt-cast-role').text().trim() || null;
-        const image = $(el).find('.zt-cast-image img').attr('src') || null;
         if (name) {
-            cast.push({ name, character, image });
+            cast.push({ name, character });
         }
     });
 
@@ -224,8 +250,7 @@ async function getPageInfoAndQualities(targetUrl, reqId, baseUrl = '') {
         title,
         tagline,
         url: targetUrl,
-        poster,
-        backdrop,
+        thumbnail: poster,
         synopsis,
         details: {
             imdbId,
@@ -240,11 +265,10 @@ async function getPageInfoAndQualities(targetUrl, reqId, baseUrl = '') {
             country,
             genres
         },
-        cast,
-        gallery
+        cast
     };
 
-    // CASE A: TV SHOW -> Extract Seasons & Season Download Links
+    // CASE A: TV SHOW -> Extract ONLY Season Links (No individual episode links in /qualities)
     if (isTvShow) {
         const seasons = [];
         $('.season-select ul.episodes-list').each((i, ulEl) => {
@@ -266,21 +290,29 @@ async function getPageInfoAndQualities(targetUrl, reqId, baseUrl = '') {
             });
 
             if (episodes.length > 0) {
-                seasons.push({
+                const seasonObj = {
                     season: seasonNum,
+                    title: `Season ${seasonNum}`,
                     episodeCount: episodes.length,
-                    seasonDownloadUrl: baseUrl
+                    downloadUrl: baseUrl
                         ? `${baseUrl}/download?url=${encodeURIComponent(targetUrl)}&season=${seasonNum}`
-                        : null,
-                    episodes
-                });
+                        : `${targetUrl}?season=${seasonNum}`
+                };
+
+                // Only attach episodes array if explicitly requested internally by /download
+                if (includeEpisodes) {
+                    seasonObj.episodes = episodes;
+                }
+
+                seasons.push(seasonObj);
             }
         });
 
         log(`INFO:${reqId}`, `✅ TV Show parsed: ${seasons.length} seasons found`);
         return {
             type: 'tvshow',
-            movie: movieMeta,
+            ...movieMeta,
+            totalSeasons: seasons.length,
             seasons
         };
     }
@@ -323,7 +355,7 @@ async function getPageInfoAndQualities(targetUrl, reqId, baseUrl = '') {
 
     return {
         type: isEpisode ? 'episode' : 'movie',
-        movie: movieMeta,
+        ...movieMeta,
         downloads
     };
 }
@@ -674,14 +706,12 @@ async function findAndRealClickTvButton(state, reqId) {
         await delay(800);
 
         const scanResult = await page.evaluate(() => {
-            // #dl-links ඇතුළේ තියෙන buttons වලට ප්‍රමුඛතාවය දෙනවා
             const buttons = Array.from(document.querySelectorAll('#dl-links .button.direct-download, .button.direct-download, a.direct-download, button.direct-download'));
 
             const details = buttons.map((btn, idx) => {
                 const style = window.getComputedStyle(btn);
                 const rect = btn.getBoundingClientRect();
 
-                // Cinesubz fake buttons hide කරන්න පාවිච්චි කරන CSS tricks filter කිරීම
                 const isFake =
                     style.position === 'absolute' ||
                     (style.clipPath && style.clipPath.includes('inset')) ||
@@ -720,7 +750,6 @@ async function findAndRealClickTvButton(state, reqId) {
                 const newRect = targetEl.getBoundingClientRect();
                 preferred.rect = { x: newRect.x, y: newRect.y, width: newRect.width, height: newRect.height };
 
-                // Button එක උඩ තියෙන transparent ad overlays ඔක්කොම අයින් කිරීම
                 const centerX = newRect.x + newRect.width / 2;
                 const centerY = newRect.y + newRect.height / 2;
                 let topEl = document.elementFromPoint(centerX, centerY);
@@ -904,7 +933,7 @@ app.get('/', (req, res) => {
             <span class="method">GET</span>
             <span class="path">/search?q={query}</span>
         </div>
-        <p>Search movies or TV series by name. Returns title, content type (<code>Movie</code> / <code>TV Series</code>), and page URL.</p>
+        <p>Search movies or TV series by name. Returns title, content type (<code>Movie</code> / <code>TV Series</code>), thumbnail, and page URL.</p>
         <table>
             <tr><th>Parameter</th><th>Required</th><th>Description</th></tr>
             <tr><td><code>q</code></td><td>Yes</td><td>Movie or TV series name to search (e.g., <code>loki</code>)</td></tr>
@@ -919,13 +948,13 @@ app.get('/', (req, res) => {
             <span class="path">/qualities?url={movieOrTvUrl}</span>
             <span style="color:#94a3b8; font-size:0.85rem;">(Alias: <code>/info</code>)</span>
         </div>
-        <p>Extracts full metadata (poster, synopsis, IMDb rating, cast, gallery). For <strong>Movies</strong>, resolves all ZT links into <code>driveUrl</code>. For <strong>TV Shows</strong>, extracts all <code>seasons</code> with episode lists and ready-to-use <code>seasonDownloadUrl</code> links.</p>
+        <p>Extracts metadata and main thumbnail. For <strong>Movies</strong>, resolves all ZT links into <code>driveUrl</code>. For <strong>TV Shows</strong>, extracts only <code>seasons</code> download links without individual episode links.</p>
         <table>
             <tr><th>Parameter</th><th>Required</th><th>Description</th></tr>
             <tr><td><code>url</code></td><td>Yes</td><td>Movie or TV Series page URL obtained from <code>/search</code></td></tr>
         </table>
         <span class="label">Example Request (TV Show)</span>
-        <pre>${baseUrl}/info?url=https://cinesubz.lk/tvshows/loki-2021-sinhala-subtitles/</pre>
+        <pre>${baseUrl}/qualities?url=https://cinesubz.lk/tvshows/loki-2021-sinhala-subtitles/</pre>
     </div>
 
     <div class="card">
@@ -975,7 +1004,8 @@ app.get(['/qualities', '/info'], async (req, res) => {
     }
     try {
         const baseUrl = `${req.protocol}://${req.get('host')}`;
-        const data = await getPageInfoAndQualities(targetUrl, req.reqId, baseUrl);
+        // includeEpisodes = false -> returns ONLY season links for TV Shows
+        const data = await getPageInfoAndQualities(targetUrl, req.reqId, baseUrl, false);
         res.json({ success: true, ...data });
     } catch (e) {
         log(`ERR:${req.reqId}`, `Info/Qualities fetch failed: ${e.message}`);
@@ -1003,7 +1033,8 @@ app.get('/download', async (req, res) => {
 
             log(`TV-DL:${req.reqId}`, `📺 TV Show detected! Fetching Season ${requestedSeason} episodes...`);
 
-            const showData = await getPageInfoAndQualities(inputUrl, req.reqId);
+            // includeEpisodes = true -> needed internally to resolve each episode's ZT link
+            const showData = await getPageInfoAndQualities(inputUrl, req.reqId, '', true);
             if (!showData.seasons || showData.seasons.length === 0) {
                 return res.status(404).json({ success: false, error: 'No seasons or episodes found for this TV show' });
             }
@@ -1011,14 +1042,13 @@ app.get('/download', async (req, res) => {
             const selectedSeason = showData.seasons.find(s => s.season === requestedSeason) || showData.seasons[0];
             log(`TV-DL:${req.reqId}`, `⚡ Resolving ZT links for all ${selectedSeason.episodes.length} episodes in Season ${selectedSeason.season}...`);
 
-            // සියලුම episodes වල ZT links මුලින්ම resolve කර Drive links ලබාගැනීම
             const resolvedEpisodes = await Promise.all(
                 selectedSeason.episodes.map(async (ep) => {
                     const epInfo = await getPageInfoAndQualities(ep.url, req.reqId);
                     const validDownloads = (epInfo.downloads || []).filter(d => d.driveUrl);
 
                     if (validDownloads.length === 0) {
-                        log(`TV-DL:${reqId}`, `⚠️ No valid Drive links for S${ep.season}E${ep.episode}`);
+                        log(`TV-DL:${req.reqId}`, `⚠️ No valid Drive links for S${ep.season}E${ep.episode}`);
                         return null;
                     }
 
@@ -1050,7 +1080,8 @@ app.get('/download', async (req, res) => {
             return res.json({
                 success: true,
                 type: 'tvshow',
-                title: showData.movie.title,
+                title: showData.title,
+                thumbnail: showData.thumbnail,
                 season: selectedSeason.season,
                 totalEpisodes: episodeResults.length,
                 episodes: episodeResults
@@ -1075,10 +1106,10 @@ app.get('/download', async (req, res) => {
             const [epResult] = await extractTvBatchR2Links([{
                 season: null,
                 episode: 1,
-                title: epInfo.movie.title,
+                title: epInfo.title,
                 label: chosenDl.label,
                 size: chosenDl.size,
-                name: epInfo.movie.title,
+                name: epInfo.title,
                 driveUrl: chosenDl.driveUrl
             }], req.reqId, 1);
 
@@ -1089,7 +1120,8 @@ app.get('/download', async (req, res) => {
             return res.json({
                 success: true,
                 type: 'episode',
-                title: epInfo.movie.title,
+                title: epInfo.title,
+                thumbnail: epInfo.thumbnail,
                 label: chosenDl.label,
                 driveUrl: chosenDl.driveUrl,
                 downloadUrl: epResult.downloadUrl
